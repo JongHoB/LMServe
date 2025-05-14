@@ -1,0 +1,182 @@
+use std::cmp::min;
+use std::collections::{HashMap, VecDeque};
+
+use tokenizers::tokenizer::Tokenizer;
+
+use crate::block_manager::BlockManager;
+use crate::infer_task::{InferInput, InferOutput, InferTask};
+use crate::sequence::{SeqStatus, Sequence};
+
+pub struct Scheduler {
+    pub max_batch_size: usize,
+    pub max_seq_len: usize,
+    pub max_num_batched_tokens: usize,
+    block_manager: BlockManager,
+    watermark_blocks: f32,
+    waiting: VecDeque<InferTask>,
+    allocated: VecDeque<InferTask>,
+}
+
+impl Scheduler {
+    pub fn new(
+        max_batch_size: usize,
+        max_seq_len: usize,
+        max_num_batched_tokens: usize,
+        block_size: usize,
+        num_blocks: usize,
+    ) -> Scheduler {
+        Scheduler {
+            max_batch_size,
+            max_seq_len,
+            max_num_batched_tokens,
+            block_manager: BlockManager::new(block_size, num_blocks),
+            watermark_blocks: 0.97,
+            waiting: VecDeque::new(),
+            allocated: VecDeque::new(),
+        }
+    }
+
+    pub fn add(&mut self, infer_task: InferTask) {
+        self.waiting.push_back(infer_task);
+    }
+
+    pub fn can_alloc_seq(&self, seq: &Sequence, watermark: f32) -> bool {
+        let num_blocks = self.block_manager.get_num_required_blocks(seq);
+        self.block_manager.can_alloc_blocks(num_blocks, watermark)
+    }
+
+    pub fn try_reserve_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
+        let mut seqs = infer_task.get_active_seqs_mut();
+        let mut seq_iter = seqs.iter_mut();
+
+        let Some(head_seq) = seq_iter.next() else {
+            return false;
+        };
+
+        if !self.can_alloc_seq(head_seq, watermark) {
+            return false;
+        }
+
+        self.block_manager.reserve_blocks(head_seq);
+        head_seq.status = SeqStatus::ALLOCATED;
+
+        for seq in seq_iter {
+            self.block_manager.share_blocks(head_seq, seq);
+            if self.can_alloc_seq(seq, watermark) {
+                self.block_manager.reserve_blocks(seq);
+                seq.status = SeqStatus::ALLOCATED;
+            }
+        }
+
+        true
+    }
+
+    pub fn try_extend_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
+        let mut num_alloc_seqs = 0;
+        let seqs = infer_task.get_active_seqs_mut();
+        for seq in seqs {
+            if self.can_alloc_seq(seq, watermark) {
+                self.block_manager.reserve_blocks(seq);
+                seq.status = SeqStatus::ALLOCATED;
+                num_alloc_seqs += 1;
+            }
+        }
+
+        num_alloc_seqs > 0
+    }
+
+    pub fn generate_infer_inputs(&self) -> Vec<InferInput> {
+        let mut infer_inputs: Vec<InferInput> = Vec::new();
+
+        let mut num_seqs = 0;
+        let mut token_budget = self.max_num_batched_tokens;
+        'outer: for infer_task in self.allocated.iter() {
+            for seq in infer_task.get_seqs(SeqStatus::ALLOCATED) {
+                if num_seqs >= self.max_batch_size || token_budget == 0 {
+                    break 'outer;
+                }
+
+                let filled = self.block_manager.get_filled_token_len(seq.seq_id);
+                let total = seq.token_ids.len();
+                let input_len = min(total - filled, token_budget);
+                if input_len > 0 {
+                    let input_ids = seq.token_ids[filled..filled + input_len].to_vec();
+                    let block_ids = self.block_manager.get_block_ids(seq);
+
+                    infer_inputs.push(InferInput::new(seq.seq_id, input_ids, filled, block_ids));
+
+                    num_seqs += 1;
+                    token_budget -= input_len;
+                }
+            }
+        }
+
+        infer_inputs
+    }
+
+    pub fn schedule(&mut self) -> Vec<InferInput> {
+        let mut allocated: VecDeque<InferTask> = VecDeque::new();
+
+        while let Some(mut infer_task) = self.allocated.pop_front() {
+            if self.try_extend_infer_task(&mut infer_task, 1.0) {
+                allocated.push_back(infer_task);
+            } else {
+                if let Some(preempt_task) = self.allocated.pop_back() {
+                    self.waiting.push_front(preempt_task);
+                    // TODO(jinu): Add request preemption.
+                    self.allocated.push_front(infer_task);
+                    continue;
+                } else {
+                    self.waiting.push_front(infer_task);
+                    break;
+                }
+            }
+        }
+
+        while let Some(mut infer_task) = self.waiting.pop_front() {
+            if self.try_reserve_infer_task(&mut infer_task, self.watermark_blocks) {
+                allocated.push_back(infer_task);
+            } else {
+                self.waiting.push_front(infer_task);
+                break;
+            }
+        }
+
+        self.allocated = allocated;
+        let infer_inputs = self.generate_infer_inputs();
+
+        infer_inputs
+    }
+
+    pub fn update(&mut self, infer_outputs: HashMap<u64, InferOutput>) -> Vec<InferTask> {
+        let mut finished_tasks: Vec<InferTask> = Vec::new();
+        let mut still_allocated_tasks = VecDeque::with_capacity(self.allocated.len());
+
+        for mut task in self.allocated.drain(..) {
+            for seq in task.get_active_seqs_mut() {
+                let Some(output) = infer_outputs.get(&seq.seq_id) else {
+                    continue;
+                };
+
+                seq.append_output_id(output.output_id);
+
+                if seq
+                    .max_output_len
+                    .map_or(false, |max_output_len| seq.output_len >= max_output_len)
+                {
+                    seq.status = SeqStatus::FINISHED;
+                }
+            }
+
+            if task.is_finished() {
+                finished_tasks.push(task);
+            } else {
+                still_allocated_tasks.push_back(task);
+            }
+        }
+
+        self.allocated = still_allocated_tasks;
+
+        finished_tasks
+    }
+}

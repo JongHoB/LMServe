@@ -1,0 +1,340 @@
+use std::cmp::min;
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::sequence::Sequence;
+
+#[derive(PartialEq, Eq)]
+enum BlockStatus {
+    FREE,
+    USED,
+}
+
+struct Block {
+    id: u32,
+    block_size: usize,
+    ref_cnt: i32,
+    status: BlockStatus,
+    token_ids: Vec<u32>,
+}
+
+impl Block {
+    pub fn new(id: u32, block_size: usize) -> Block {
+        Block {
+            id,
+            block_size,
+            ref_cnt: 0,
+            status: BlockStatus::FREE,
+            token_ids: Vec::new(),
+        }
+    }
+
+    pub fn append_tokens(&mut self, new_token_ids: &mut Vec<u32>) {
+        assert!(self.token_ids.len() + new_token_ids.len() <= self.block_size as usize);
+
+        self.token_ids.append(new_token_ids);
+    }
+
+    pub fn get_num_empty_slots(&self) -> usize {
+        self.block_size - self.token_ids.len()
+    }
+}
+
+#[derive(Debug)]
+pub enum BlockAllocError {
+    NotEnoughBlocks,
+    EmptyTokenIds { seq_id: u64 },
+    NotFoundBlockTable { seq_id: u64 },
+}
+
+impl fmt::Display for BlockAllocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlockAllocError::NotEnoughBlocks => write!(f, "Not enough blocks available"),
+            BlockAllocError::EmptyTokenIds { seq_id } => {
+                write!(f, "token_ids is empty for seq_id {}", seq_id)
+            }
+            BlockAllocError::NotFoundBlockTable { seq_id } => {
+                write!(f, "Not found block table for seq_id {}", seq_id)
+            }
+        }
+    }
+}
+
+impl std::error::Error for BlockAllocError {}
+
+struct BlockAllocator {
+    block_size: usize,
+    num_total_blocks: usize,
+    block_pool: Vec<Block>,
+    free_block_ids: Vec<u32>,
+}
+
+impl BlockAllocator {
+    pub fn new(block_size: usize, num_blocks: usize) -> BlockAllocator {
+        let block_pool: Vec<Block> = (0..num_blocks as u32)
+            .map(|id| Block::new(id, block_size))
+            .collect();
+        let free_block_ids: Vec<u32> = block_pool.iter().map(|b| b.id).collect();
+
+        BlockAllocator {
+            block_size,
+            num_total_blocks: num_blocks,
+            block_pool,
+            free_block_ids,
+        }
+    }
+
+    pub fn get_block(&mut self, block_id: u32) -> &mut Block {
+        self.block_pool
+            .get_mut(block_id as usize)
+            .expect(&format!("Block ID {} is out of bounds", block_id))
+    }
+
+    fn can_alloc_blocks(&self, num_required_blocks: usize, watermark: f32) -> bool {
+        assert!(
+            0.0 < watermark && watermark <= 1.0,
+            "watermark must be in (0, 1]"
+        );
+        let num_free_blocks = self.free_block_ids.len();
+        let num_used_blocks = self.num_total_blocks - num_free_blocks;
+
+        num_used_blocks + num_required_blocks <= (watermark * self.num_total_blocks as f32) as usize
+    }
+
+    pub fn alloc_block(&mut self) -> &mut Block {
+        if let Some(block_id) = self.free_block_ids.pop() {
+            let block = &mut self.block_pool[block_id as usize];
+
+            if block.status == BlockStatus::USED {
+                panic!("Cannot allocate block {block_id}: alread in used.");
+            }
+
+            block.status = BlockStatus::USED;
+            block.ref_cnt = 1;
+            block
+        } else {
+            panic!("Cannot allocate block: all blocks are already in use.");
+        }
+    }
+
+    pub fn free_block(&mut self, block_id: u32) {
+        let block = self.get_block(block_id);
+        assert!(
+            block.status != BlockStatus::FREE || block.ref_cnt < 0,
+            "Double free detected for block {}.",
+            block_id
+        );
+        block.ref_cnt -= 1;
+        if block.ref_cnt == 0 {
+            block.token_ids.clear();
+            block.status = BlockStatus::FREE;
+            self.free_block_ids.push(block_id);
+        }
+    }
+}
+
+struct BlockMap {
+    block_ids: Vec<u32>,
+    num_allocated_slots: usize,
+    filled_token_len: usize,
+}
+
+impl BlockMap {
+    fn new(block_ids: Vec<u32>, num_allocated_slots: usize, filled_token_len: usize) -> BlockMap {
+        BlockMap {
+            block_ids,
+            num_allocated_slots,
+            filled_token_len,
+        }
+    }
+
+    fn append_block_ids(&mut self, block_ids: &mut Vec<u32>, num_allocated_slots: usize) {
+        self.block_ids.append(block_ids);
+        self.num_allocated_slots += num_allocated_slots;
+    }
+}
+
+pub struct BlockManager {
+    block_size: usize,
+    block_mapping_table: HashMap<u64, BlockMap>,
+    block_allocator: BlockAllocator,
+}
+
+impl BlockManager {
+    pub fn new(block_size: usize, num_blocks: usize) -> BlockManager {
+        let block_allocator = BlockAllocator::new(block_size, num_blocks);
+
+        BlockManager {
+            block_size,
+            block_mapping_table: HashMap::new(),
+            block_allocator,
+        }
+    }
+
+    pub fn get_block_ids(&self, seq: &Sequence) -> Vec<u32> {
+        self.block_mapping_table
+            .get(&seq.seq_id)
+            .map_or(Vec::new(), |block_map| block_map.block_ids.clone())
+    }
+
+    pub fn get_filled_token_len(&self, seq_id: u64) -> usize {
+        self.block_mapping_table
+            .get(&seq_id)
+            .map_or(0, |block_map| block_map.filled_token_len)
+    }
+
+    pub fn get_num_required_blocks(&self, seq: &Sequence) -> usize {
+        let filled_token_len = self.get_filled_token_len(seq.seq_id);
+        let total_token_len = seq.token_ids.len();
+        let num_required_slots = total_token_len.saturating_sub(filled_token_len);
+        num_required_slots.div_ceil(self.block_size)
+    }
+
+    fn get_last_block(&mut self, seq_id: u64) -> Option<&mut Block> {
+        let block_map = self.block_mapping_table.get(&seq_id)?;
+        let last_block_id = block_map.block_ids.last()?;
+        Some(self.block_allocator.get_block(*last_block_id))
+    }
+
+    fn get_num_allocated_slots(&self, seq_id: u64) -> usize {
+        self.block_mapping_table
+            .get(&seq_id)
+            .map_or(0, |block_map| block_map.num_allocated_slots)
+    }
+
+    pub fn can_alloc_blocks(&self, num_blocks: usize, watermark: f32) -> bool {
+        self.block_allocator.can_alloc_blocks(num_blocks, watermark)
+    }
+
+    fn contiguous_alloc_blocks(&mut self, seq: &Sequence) -> usize {
+        let num_allocated_slots = self.get_num_allocated_slots(seq.seq_id);
+        let token_ids = seq.token_ids[num_allocated_slots..].to_vec();
+        let num_alloc_tokens = token_ids.len();
+
+        let mut num_append_slots = 0;
+        if let Some(last_block) = self.get_last_block(seq.seq_id) {
+            num_append_slots = min(last_block.get_num_empty_slots(), token_ids.len());
+            if num_append_slots > 0 {
+                let sub_token_ids = &mut (token_ids[..num_append_slots]).to_vec();
+                last_block.append_tokens(sub_token_ids);
+            }
+        }
+
+        let mut add_block_ids: Vec<u32> = Vec::new();
+        if num_alloc_tokens > num_append_slots {
+            for sub_token_ids in token_ids[num_append_slots..].chunks(self.block_size) {
+                let block = self.block_allocator.alloc_block();
+                block.append_tokens(&mut sub_token_ids.to_vec());
+                add_block_ids.push(block.id);
+            }
+        }
+
+        self.block_mapping_table
+            .entry(seq.seq_id)
+            .and_modify(|block_map| {
+                block_map.append_block_ids(&mut add_block_ids, num_alloc_tokens)
+            })
+            .or_insert(BlockMap::new(add_block_ids, num_alloc_tokens, 0));
+
+        num_alloc_tokens
+    }
+
+    fn copy_block(&mut self, src_block_id: u32) -> &mut Block {
+        let token_ids = {
+            let src_block = self.block_allocator.get_block(src_block_id);
+            src_block.token_ids.clone()
+        };
+        let new_block = self.block_allocator.alloc_block();
+        new_block.token_ids = token_ids.clone();
+        new_block
+    }
+
+    pub fn reserve_blocks(&mut self, seq: &Sequence) -> usize {
+        self.contiguous_alloc_blocks(seq)
+    }
+
+    pub fn extend_blocks(
+        &mut self,
+        seq: &Sequence,
+        blocks_to_copy: &mut HashMap<u32, Vec<u32>>,
+    ) -> usize {
+        // TODO(jinu): Remove copy blocks.
+        let copy_block_id = self
+            .get_last_block(seq.seq_id)
+            .filter(|last_block| last_block.ref_cnt > 1 && last_block.get_num_empty_slots() > 0)
+            .map(|last_block| last_block.id);
+
+        if let Some(copy_block_id) = copy_block_id {
+            let new_block_id = self.copy_block(copy_block_id).id;
+            self.block_allocator.free_block(copy_block_id);
+
+            self.block_mapping_table
+                .entry(seq.seq_id)
+                .and_modify(|block_map| {
+                    if let Some(last_block_id) = block_map.block_ids.last_mut() {
+                        *last_block_id = new_block_id;
+                    }
+                });
+
+            blocks_to_copy
+                .entry(copy_block_id)
+                .and_modify(|block_ids| block_ids.push(new_block_id))
+                .or_insert(vec![new_block_id]);
+        }
+
+        self.contiguous_alloc_blocks(seq)
+    }
+
+    pub fn share_blocks(
+        &mut self,
+        src_seq: &Sequence,
+        dst_seq: &Sequence,
+    ) -> Result<Vec<u32>, BlockAllocError> {
+        let mut share_block_ids: Vec<u32> = Vec::new();
+        let src_block_map = self.block_mapping_table.get(&src_seq.seq_id).ok_or(
+            BlockAllocError::NotFoundBlockTable {
+                seq_id: src_seq.seq_id,
+            },
+        )?;
+
+        let dst_token_ids = &dst_seq.token_ids;
+        let dst_seq_len = dst_token_ids.len();
+        let max_share_token_len = min(
+            dst_seq_len - 1,
+            self.get_num_allocated_slots(src_seq.seq_id),
+        );
+
+        let mut shared_token_len = 0;
+        let mut iter = dst_token_ids.chunks_exact(self.block_size);
+        for block_id in &src_block_map.block_ids {
+            let dst_sub_token_ids = match iter.next() {
+                Some(token_ids) => token_ids,
+                None => break,
+            };
+
+            let dst_sub_token_len = dst_sub_token_ids.len();
+            if shared_token_len + dst_sub_token_len > max_share_token_len {
+                break;
+            }
+
+            let block = self.block_allocator.get_block(*block_id);
+            if block.token_ids != dst_sub_token_ids {
+                break;
+            }
+
+            block.ref_cnt += 1;
+            share_block_ids.push(*block_id);
+            shared_token_len += dst_sub_token_len;
+        }
+
+        if share_block_ids.len() > 0 {
+            self.block_mapping_table.insert(
+                dst_seq.seq_id,
+                BlockMap::new(share_block_ids, shared_token_len, shared_token_len),
+            );
+        }
+
+        Ok(dst_token_ids[0..shared_token_len].to_vec())
+    }
+}
