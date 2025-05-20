@@ -1,11 +1,12 @@
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 
-use tokenizers::tokenizer::Tokenizer;
+use tracing::info;
 
 use crate::block_manager::BlockManager;
 use crate::infer_task::{InferInput, InferOutput, InferTask};
 use crate::sequence::{SeqStatus, Sequence};
+use crate::utils::now;
 
 pub struct Scheduler {
     pub max_batch_size: usize,
@@ -15,6 +16,8 @@ pub struct Scheduler {
     watermark_blocks: f32,
     waiting: VecDeque<InferTask>,
     allocated: VecDeque<InferTask>,
+
+    last_log_time: u64,
 }
 
 impl Scheduler {
@@ -33,6 +36,7 @@ impl Scheduler {
             watermark_blocks: 0.97,
             waiting: VecDeque::new(),
             allocated: VecDeque::new(),
+            last_log_time: 0,
         }
     }
 
@@ -40,12 +44,12 @@ impl Scheduler {
         self.waiting.push_back(infer_task);
     }
 
-    pub fn can_alloc_seq(&self, seq: &Sequence, watermark: f32) -> bool {
+    fn can_alloc_seq(&self, seq: &Sequence, watermark: f32) -> bool {
         let num_blocks = self.block_manager.get_num_required_blocks(seq);
         self.block_manager.can_alloc_blocks(num_blocks, watermark)
     }
 
-    pub fn try_reserve_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
+    fn try_reserve_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
         let mut seqs = infer_task.get_active_seqs_mut();
         let mut seq_iter = seqs.iter_mut();
 
@@ -61,7 +65,9 @@ impl Scheduler {
         head_seq.status = SeqStatus::ALLOCATED;
 
         for seq in seq_iter {
-            self.block_manager.share_blocks(head_seq, seq);
+            self.block_manager
+                .share_blocks(head_seq, seq)
+                .unwrap_or_else(|e| panic!("Failed to share KV block: {e}"));
             if self.can_alloc_seq(seq, watermark) {
                 self.block_manager.reserve_blocks(seq);
                 seq.status = SeqStatus::ALLOCATED;
@@ -71,7 +77,7 @@ impl Scheduler {
         true
     }
 
-    pub fn try_extend_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
+    fn try_extend_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
         let mut num_alloc_seqs = 0;
         let seqs = infer_task.get_active_seqs_mut();
         for seq in seqs {
@@ -85,7 +91,7 @@ impl Scheduler {
         num_alloc_seqs > 0
     }
 
-    pub fn generate_infer_inputs(&self) -> Vec<InferInput> {
+    fn generate_infer_inputs(&self) -> Vec<InferInput> {
         let mut infer_inputs: Vec<InferInput> = Vec::new();
 
         let mut num_seqs = 0;
@@ -145,6 +151,20 @@ impl Scheduler {
         self.allocated = allocated;
         let infer_inputs = self.generate_infer_inputs();
 
+        {
+            // Logging
+            let now = now();
+
+            if now > self.last_log_time + 5e9 as u64 {
+                info!(
+                    "Running: {} seqs, {:}",
+                    infer_inputs.len(),
+                    self.get_log_text()
+                );
+                self.last_log_time = now;
+            }
+        }
+
         infer_inputs
     }
 
@@ -158,7 +178,7 @@ impl Scheduler {
                     continue;
                 };
 
-                seq.append_output_id(output.output_id);
+                seq.append_output_id(output.output_id, output.prob);
 
                 if seq
                     .max_output_len
@@ -175,8 +195,36 @@ impl Scheduler {
             }
         }
 
+        for task in finished_tasks.iter() {
+            self.remove_task(task);
+        }
+
         self.allocated = still_allocated_tasks;
 
         finished_tasks
+    }
+
+    fn remove_task(&mut self, infer_task: &InferTask) {
+        for seq in infer_task.get_seqs(SeqStatus::FINISHED) {
+            self.block_manager.free(seq).unwrap_or_else(|e| {
+                panic!(
+                    "Failed to free KV blocks for sequence {}: {}",
+                    seq.seq_id, e
+                )
+            });
+        }
+    }
+
+    fn get_log_text(&self) -> String {
+        let num_allocated_reqs: usize = self.allocated.len();
+        let num_waiting_reqs: usize = self.waiting.len();
+        let kv_block_usage: f32 = self.block_manager.get_block_usage();
+
+        format!(
+            "Allocated: {} reqs, Waiting: {} reqs, KV cache usage: {:.2} %",
+            num_allocated_reqs,
+            num_waiting_reqs,
+            kv_block_usage * 100.0
+        )
     }
 }

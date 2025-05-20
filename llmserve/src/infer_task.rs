@@ -1,3 +1,4 @@
+pub use crate::pb::worker::{InferInput, InferOutput};
 use crate::sequence::{SeqStatus, Sequence};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -7,6 +8,7 @@ pub enum InferTaskStatus {
     PREFILL,
 }
 
+#[allow(dead_code)]
 pub struct InferTask {
     session_id: String,
     seqs: Vec<Sequence>,
@@ -54,18 +56,13 @@ impl InferTask {
         self.status = InferTaskStatus::DECODE;
     }
 
-    pub fn is_finished(&mut self) -> bool{
+    pub fn is_finished(&mut self) -> bool {
         self.seqs.iter().all(|seq| seq.is_finished())
     }
-}
 
-pub struct InferInput {
-    pub seq_id: u64,
-    input_ids: Vec<u32>,
-    input_len: usize,
-    filled_token_len: usize,
-    context_len: usize,
-    block_ids: Vec<u32>,
+    pub fn get_session_id(&self) -> String {
+        self.session_id.clone()
+    }
 }
 
 impl InferInput {
@@ -75,24 +72,22 @@ impl InferInput {
         filled_token_len: usize,
         block_ids: Vec<u32>,
     ) -> InferInput {
-        let input_len = input_ids.len();
+        let input_len = input_ids.len() as u64;
+        let context_len = input_ids.len() + filled_token_len;
+
         InferInput {
             seq_id,
             input_ids,
             input_len,
-            filled_token_len,
-            context_len: filled_token_len + input_len,
+            filled_token_len: filled_token_len as u64,
+            context_len: context_len as u64,
             block_ids,
         }
     }
 }
 
-pub struct InferOutput {
-    pub output_id: u32,
-}
-
 impl InferOutput {
-    pub fn new(output_id: u32) -> InferOutput {
-        InferOutput { output_id }
+    pub fn new(output_id: u32, prob: f32) -> InferOutput {
+        InferOutput { output_id, prob }
     }
 }

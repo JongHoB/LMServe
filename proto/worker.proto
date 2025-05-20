@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "io.grpc.examples.routeguide";
+option java_outer_classname = "RouteGuideProto";
+
+package worker;
+
+service Worker {
+  rpc Warmup(WarmupRequest) returns (WarmupResponse);
+  rpc Infer(InferRequest) returns (InferResponse);
+  rpc InitCache(InitCacheRequest) returns (InitCacheResponse);
+}
+
+message WarmupRequest {
+  uint64 max_batch_size = 1;
+  uint64 max_seq_len = 2;
+  uint64 max_num_batched_tokens = 3;
+}
+
+message WarmupResponse {
+  uint64 gpu_total_mem_size = 1;
+  uint64 gpu_peak_mem_size = 2;
+}
+
+message InferInput {
+  uint64 seq_id = 1;
+  repeated uint32 input_ids = 2;
+  uint64 input_len = 3;
+  uint64 filled_token_len = 4;
+  uint64 context_len = 5;
+  repeated uint32 block_ids = 6;
+}
+
+message InferRequest {
+  repeated InferInput inputs = 1;
+  bool use_cache = 2;
+}
+
+message InferOutput {
+  uint32 output_id = 1;
+  float prob = 2;
+}
+
+message InferResponse { map<uint64, InferOutput> outputs = 1; }
+
+message InitCacheRequest { uint64 cache_size = 2; }
+
+message InitCacheResponse { uint64 num_blocks = 1; }

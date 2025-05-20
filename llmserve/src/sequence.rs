@@ -14,17 +14,21 @@ pub enum StopReason {
     MAXLENGTH,
 }
 
+#[allow(dead_code)]
 pub struct Sequence {
     pub seq_id: u64,
     pub session_id: String,
 
     pub prompt: String,
     pub token_ids: Vec<u32>,
-    pub max_output_len: Option<u32>,
+
+    pub max_output_len: Option<usize>,
 
     pub status: SeqStatus,
     pub stop_reason: Option<StopReason>,
-    pub output_len: u32,
+
+    pub prompt_len: usize,
+    pub output_len: usize,
     output_words: Vec<String>,
     output_token_probs: Vec<f32>,
     filled_token_ids: Vec<u32>,
@@ -37,9 +41,10 @@ impl Sequence {
         session_id: String,
         prompt: String,
         token_ids: Vec<u32>,
-        max_output_len: Option<u32>,
+        max_output_len: Option<usize>,
     ) -> Sequence {
         let seq_id = utils::generate_seq_id();
+        let prompt_len = token_ids.len();
 
         Sequence {
             seq_id,
@@ -49,6 +54,7 @@ impl Sequence {
             max_output_len,
             status: SeqStatus::WAITING,
             stop_reason: None,
+            prompt_len,
             output_len: 0,
             output_words: Vec::new(),
             output_token_probs: Vec::new(),
@@ -57,7 +63,7 @@ impl Sequence {
         }
     }
 
-    pub fn is_active(&self) -> bool{
+    pub fn is_active(&self) -> bool {
         matches!(self.status, SeqStatus::WAITING | SeqStatus::ALLOCATED)
     }
 
@@ -65,9 +71,17 @@ impl Sequence {
         matches!(self.status, SeqStatus::FINISHED | SeqStatus::CANCELLED)
     }
 
-    pub fn append_output_id(&mut self, output_id: u32) {
+    pub fn get_token_ids(&self) -> &[u32] {
+        self.token_ids.as_ref()
+    }
+
+    pub fn get_token_probs(&self) -> Vec<f32> {
+        self.output_token_probs.clone()
+    }
+
+    pub fn append_output_id(&mut self, output_id: u32, prob: f32) {
         self.token_ids.push(output_id);
         self.output_len += 1;
-        // TODO(jinu): Add prob & word.
+        self.output_token_probs.push(prob)
     }
 }

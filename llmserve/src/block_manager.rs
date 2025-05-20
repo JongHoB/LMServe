@@ -19,7 +19,7 @@ struct Block {
 }
 
 impl Block {
-    pub fn new(id: u32, block_size: usize) -> Block {
+    fn new(id: u32, block_size: usize) -> Block {
         Block {
             id,
             block_size,
@@ -29,13 +29,13 @@ impl Block {
         }
     }
 
-    pub fn append_tokens(&mut self, new_token_ids: &mut Vec<u32>) {
+    fn append_tokens(&mut self, new_token_ids: &mut Vec<u32>) {
         assert!(self.token_ids.len() + new_token_ids.len() <= self.block_size as usize);
 
         self.token_ids.append(new_token_ids);
     }
 
-    pub fn get_num_empty_slots(&self) -> usize {
+    fn get_num_empty_slots(&self) -> usize {
         self.block_size - self.token_ids.len()
     }
 }
@@ -63,6 +63,7 @@ impl fmt::Display for BlockAllocError {
 
 impl std::error::Error for BlockAllocError {}
 
+#[allow(dead_code)]
 struct BlockAllocator {
     block_size: usize,
     num_total_blocks: usize,
@@ -85,7 +86,7 @@ impl BlockAllocator {
         }
     }
 
-    pub fn get_block(&mut self, block_id: u32) -> &mut Block {
+    fn get_block(&mut self, block_id: u32) -> &mut Block {
         self.block_pool
             .get_mut(block_id as usize)
             .expect(&format!("Block ID {} is out of bounds", block_id))
@@ -102,13 +103,15 @@ impl BlockAllocator {
         num_used_blocks + num_required_blocks <= (watermark * self.num_total_blocks as f32) as usize
     }
 
-    pub fn alloc_block(&mut self) -> &mut Block {
+    fn alloc_block(&mut self) -> &mut Block {
         if let Some(block_id) = self.free_block_ids.pop() {
             let block = &mut self.block_pool[block_id as usize];
 
             if block.status == BlockStatus::USED {
                 panic!("Cannot allocate block {block_id}: alread in used.");
             }
+
+            block.token_ids.clear();
 
             block.status = BlockStatus::USED;
             block.ref_cnt = 1;
@@ -118,7 +121,7 @@ impl BlockAllocator {
         }
     }
 
-    pub fn free_block(&mut self, block_id: u32) {
+    fn free_block(&mut self, block_id: u32) {
         let block = self.get_block(block_id);
         assert!(
             block.status != BlockStatus::FREE || block.ref_cnt < 0,
@@ -127,10 +130,16 @@ impl BlockAllocator {
         );
         block.ref_cnt -= 1;
         if block.ref_cnt == 0 {
-            block.token_ids.clear();
             block.status = BlockStatus::FREE;
             self.free_block_ids.push(block_id);
         }
+    }
+
+    fn get_block_usage(&self) -> f32 {
+        let num_free_blocks = self.free_block_ids.len();
+        let num_use_blocks = self.num_total_blocks - num_free_blocks;
+
+        num_use_blocks as f32 / self.num_total_blocks as f32
     }
 }
 
@@ -307,7 +316,7 @@ impl BlockManager {
 
         let mut shared_token_len = 0;
         let mut iter = dst_token_ids.chunks_exact(self.block_size);
-        for block_id in &src_block_map.block_ids {
+        for block_id in src_block_map.block_ids.iter() {
             let dst_sub_token_ids = match iter.next() {
                 Some(token_ids) => token_ids,
                 None => break,
@@ -336,5 +345,22 @@ impl BlockManager {
         }
 
         Ok(dst_token_ids[0..shared_token_len].to_vec())
+    }
+
+    pub fn free(&mut self, seq: &Sequence) -> Result<(), BlockAllocError> {
+        let block_map = self
+            .block_mapping_table
+            .remove(&seq.seq_id)
+            .ok_or(BlockAllocError::NotFoundBlockTable { seq_id: seq.seq_id })?;
+
+        for block_id in block_map.block_ids.iter() {
+            self.block_allocator.free_block(*block_id);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_block_usage(&self) -> f32 {
+        self.block_allocator.get_block_usage()
     }
 }

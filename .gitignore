@@ -1,0 +1,13 @@
+/target
+
+*.swp
+*.lock
+tags
+
+*__pycache__*
+*.egg-info
+
+llmserve/src/pb/*.rs
+worker/llmserve_worker/pb/*.py
+
+target
