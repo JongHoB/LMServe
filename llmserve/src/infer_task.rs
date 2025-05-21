@@ -87,7 +87,12 @@ impl InferInput {
 }
 
 impl InferOutput {
-    pub fn new(output_id: u32, prob: f32) -> InferOutput {
-        InferOutput { output_id, prob }
+    pub fn new(output_id: u32, prob: f32, output_word: String, is_eos: bool) -> InferOutput {
+        InferOutput {
+            output_id,
+            prob,
+            output_word,
+            is_eos,
+        }
     }
 }

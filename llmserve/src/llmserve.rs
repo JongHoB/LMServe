@@ -97,17 +97,12 @@ impl LLMServe {
 
     pub async fn add_request(
         &self,
-        prompt: String,
+        token_ids: Vec<u32>,
         num_samples: u16,
         session_id: Option<String>,
         max_output_len: Option<usize>,
+        ignore_eos: bool,
     ) -> Result<()> {
-        let token_ids = self
-            .tokenizer
-            .encode(prompt.clone(), false)?
-            .get_ids()
-            .to_vec();
-
         let session_id: String = match session_id {
             Some(session_id) => session_id,
             None => generate_session_id(),
@@ -117,9 +112,9 @@ impl LLMServe {
         for _ in 0..num_samples {
             let seq = Sequence::new(
                 session_id.clone(),
-                prompt.clone(),
                 token_ids.clone(),
                 max_output_len,
+                ignore_eos,
             );
             seqs.push(seq);
         }

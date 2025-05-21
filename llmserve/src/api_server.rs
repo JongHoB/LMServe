@@ -18,6 +18,7 @@ use llmserve::utils::{generate_session_id, norm_log_probs};
 #[derive(Serialize)]
 struct GenerateOutput {
     token_ids: Vec<u32>,
+    output_text: String,
     output_len: usize,
 }
 
@@ -27,19 +28,22 @@ struct GenerateParams {
     num_samples: u16,
     session_id: Option<String>,
     max_output_len: Option<usize>,
+    ignore_eos: bool,
 }
 
 struct APIServer {
     engine: Arc<LLMServe>,
+    tokenizer: Tokenizer,
 
     request_events: Mutex<HashMap<String, Arc<Notify>>>,
     request_outputs: Mutex<HashMap<String, InferTask>>,
 }
 
 impl APIServer {
-    fn new(engine: LLMServe) -> APIServer {
+    fn new(engine: LLMServe, tokenizer: Tokenizer) -> APIServer {
         APIServer {
             engine: Arc::new(engine),
+            tokenizer,
             request_events: Mutex::new(HashMap::new()),
             request_outputs: Mutex::new(HashMap::new()),
         }
@@ -48,6 +52,12 @@ impl APIServer {
     async fn generate(&self, mut params: GenerateParams) -> Result<GenerateOutput> {
         let session_id = generate_session_id();
         params.session_id = Some(session_id.clone());
+
+        let token_ids = self
+            .tokenizer
+            .encode(params.prompt, false)?
+            .get_ids()
+            .to_vec();
 
         let notify = Arc::new(Notify::new());
         {
@@ -59,10 +69,11 @@ impl APIServer {
 
         self.engine
             .add_request(
-                params.prompt,
+                token_ids,
                 params.num_samples,
                 Some(session_id.clone()),
                 params.max_output_len,
+                params.ignore_eos,
             )
             .await?;
 
@@ -85,8 +96,13 @@ impl APIServer {
             })
             .expect("Failed to select sequence: max_by() returned None.");
 
+        let token_ids = selected_seq.get_token_ids();
+        let output_ids = selected_seq.get_output_ids();
+        let output_text = self.tokenizer.decode(output_ids, false)?;
+
         Ok(GenerateOutput {
-            token_ids: selected_seq.get_token_ids().to_vec(),
+            token_ids: token_ids.to_vec(),
+            output_text,
             output_len: selected_seq.output_len,
         })
     }
@@ -125,6 +141,9 @@ async fn main() {
     let socket_addr = format!("{}:{}", args.address, args.port);
     let url = format!("http://{}", socket_addr);
 
+    let tokenizer =
+        Tokenizer::from_pretrained(&args.model_name, None).expect("Failed to load tokenizer");
+
     let llmserve = LLMServe::new(
         args.model_name,
         args.block_size,
@@ -136,7 +155,7 @@ async fn main() {
     .await
     .expect("Failed to start API Server");
 
-    let api_server = Arc::new(APIServer::new(llmserve));
+    let api_server = Arc::new(APIServer::new(llmserve, tokenizer));
 
     let api_server_clone = api_server.clone();
     tokio::spawn(async move {

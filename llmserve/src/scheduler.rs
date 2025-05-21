@@ -178,9 +178,11 @@ impl Scheduler {
                     continue;
                 };
 
-                seq.append_output_id(output.output_id, output.prob);
+                seq.append_output_id(output.output_id, output.prob, output.output_word.clone());
 
-                if seq
+                if !seq.ignore_eos && output.is_eos {
+                    seq.status = SeqStatus::FINISHED;
+                } else if seq
                     .max_output_len
                     .map_or(false, |max_output_len| seq.output_len >= max_output_len)
                 {

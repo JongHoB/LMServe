@@ -19,7 +19,6 @@ pub struct Sequence {
     pub seq_id: u64,
     pub session_id: String,
 
-    pub prompt: String,
     pub token_ids: Vec<u32>,
 
     pub max_output_len: Option<usize>,
@@ -34,14 +33,16 @@ pub struct Sequence {
     filled_token_ids: Vec<u32>,
 
     append_token_times: Vec<f32>,
+
+    pub ignore_eos: bool,
 }
 
 impl Sequence {
     pub fn new(
         session_id: String,
-        prompt: String,
         token_ids: Vec<u32>,
         max_output_len: Option<usize>,
+        ignore_eos: bool,
     ) -> Sequence {
         let seq_id = utils::generate_seq_id();
         let prompt_len = token_ids.len();
@@ -49,7 +50,6 @@ impl Sequence {
         Sequence {
             seq_id,
             session_id,
-            prompt,
             token_ids,
             max_output_len,
             status: SeqStatus::WAITING,
@@ -60,6 +60,7 @@ impl Sequence {
             output_token_probs: Vec::new(),
             filled_token_ids: Vec::new(),
             append_token_times: Vec::new(),
+            ignore_eos,
         }
     }
 
@@ -75,13 +76,18 @@ impl Sequence {
         self.token_ids.as_ref()
     }
 
+    pub fn get_output_ids(&self) -> &[u32] {
+        self.token_ids[self.prompt_len..].as_ref()
+    }
+
     pub fn get_token_probs(&self) -> Vec<f32> {
         self.output_token_probs.clone()
     }
 
-    pub fn append_output_id(&mut self, output_id: u32, prob: f32) {
+    pub fn append_output_id(&mut self, output_id: u32, prob: f32, output_word: String) {
         self.token_ids.push(output_id);
         self.output_len += 1;
-        self.output_token_probs.push(prob)
+        self.output_token_probs.push(prob);
+        self.output_words.push(output_word);
     }
 }

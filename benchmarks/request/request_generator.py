@@ -58,6 +58,7 @@ def generate_requests(
     max_seq_len: int,
     num_requests: int,
     num_samples: int,
+    ignore_eos: bool,
 ) -> Union[List[APIRequest], Tuple[List[APIRequest], Dict[str, str]]]:
 
     dataset = load_and_preprocess_dataset(
@@ -80,6 +81,7 @@ def generate_requests(
                 prompt=data['prompt'],
                 num_samples=num_samples,
                 max_output_len=output_len,
+                ignore_eos=ignore_eos,
             )
             requests.append(request)
 

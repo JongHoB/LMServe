@@ -72,6 +72,7 @@ def main(args):
         num_requests=num_requests,
         max_seq_len=args.max_seq_len,
         num_samples=args.num_samples,
+        ignore_eos=not args.disable_ignore_eos,
     )
 
     num_benchmark_reqs = args.num_requests
@@ -124,6 +125,12 @@ def main(args):
     print("Avg normalized output token latency: "
           f"{avg_norm_token_latency:.4f} s")
 
+    if args.print_output_text:
+        print("Below are the generated text of the processed requests:")
+        for i, output in enumerate(outputs):
+            print("### Generated output for request {}: {}\n".format(
+                i, output['output_text']))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -138,6 +145,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument("--rate", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--disable-ignore-eos", action="store_true")
+    parser.add_argument("--print-output-text", action="store_true")
     args = parser.parse_args()
 
     np.random.seed(args.seed)

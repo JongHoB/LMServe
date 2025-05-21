@@ -6,8 +6,10 @@ class APIRequest(TypedDict):
     prompt: str
     num_samples: int
     max_output_len: Optional[int]
+    ignore_eos: bool
 
 
 class APIResponse(TypedDict):
     token_ids: List[int]
+    output_text: str
     output_len: int

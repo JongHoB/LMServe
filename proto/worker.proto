@@ -40,6 +40,8 @@ message InferRequest {
 message InferOutput {
   uint32 output_id = 1;
   float prob = 2;
+  string output_word = 3;
+  bool is_eos = 4;
 }
 
 message InferResponse { map<uint64, InferOutput> outputs = 1; }

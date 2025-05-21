@@ -3,6 +3,7 @@ import flashinfer
 import numpy as np
 
 from typing import List, Tuple, Dict, Optional, Any
+from transformers import AutoTokenizer
 
 from llmserve_worker.models import get_model, ModelConfig
 from llmserve_worker.models.input_params import InputParams
@@ -131,11 +132,17 @@ class ModelWorker:
         self.model_config = ModelConfig(model_name)
         self.model = get_model(self.model_config)
 
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.vocab_cache: Dict[int, str] = {}
+
+        eos_token_ids = self.tokenizer.eos_token_ids
+        if not isinstance(eos_token_ids, list):
+            eos_token_ids = [eos_token_ids]
+        self.eos_token_ids_tensor = torch.tensor(eos_token_ids, device='cuda')
+
         self.block_size = block_size
         # The kv_caches are initialized at init_cache()
         self.kv_caches = None
-
-        self.tokenizer = tokenizer
 
         # Sampling parameters
         self.top_k: int = 1
@@ -409,12 +416,28 @@ class ModelWorker:
         next_token_ids = next_token_ids_tensor.cpu().tolist()
         probs = probs_tensor.cpu().tolist()
 
+        eos_mask_tensor = torch.isin(next_token_ids_tensor,
+                                     self.eos_token_ids_tensor)
+        eos_mask = eos_mask_tensor.cpu().tolist()
+
+        next_words = []
+        for next_token_id in next_token_ids:
+            if next_token_id in self.vocab_cache:
+                next_word = self.vocab_cache[next_token_id]
+            else:
+                next_word = self.tokenizer.decode(next_token_id)
+                self.vocab_cache[next_token_id] = next_word
+            next_words.append(next_word)
+
         outputs: Dict[InferOutput] = {}
         for i, data in enumerate(inputs):
             seq_id = data.seq_id
+            output_id = next_token_ids[i]
             outputs[seq_id] = InferOutput(
-                output_id=next_token_ids[i],
+                output_id=output_id,
                 prob=probs[i],
+                output_word=next_words[i],
+                is_eos=eos_mask[i],
             )
         return outputs
 
