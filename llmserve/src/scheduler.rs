@@ -178,6 +178,8 @@ impl Scheduler {
                     continue;
                 };
 
+                self.block_manager.update_filled_tokens(seq);
+
                 seq.append_output_id(output.output_id, output.prob, output.output_word.clone());
 
                 if !seq.ignore_eos && output.is_eos {

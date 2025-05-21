@@ -347,6 +347,12 @@ impl BlockManager {
         Ok(dst_token_ids[0..shared_token_len].to_vec())
     }
 
+    pub fn update_filled_tokens(&mut self, seq: &Sequence) {
+        self.block_mapping_table
+            .entry(seq.seq_id)
+            .and_modify(|block_map| block_map.filled_token_len = seq.token_ids.len());
+    }
+
     pub fn free(&mut self, seq: &Sequence) -> Result<(), BlockAllocError> {
         let block_map = self
             .block_mapping_table
