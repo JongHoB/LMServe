@@ -91,6 +91,16 @@ impl Scheduler {
         num_alloc_seqs > 0
     }
 
+    fn preempt_infer_task(&mut self, infer_task: &mut InferTask) {
+        let seqs = infer_task.get_active_seqs_mut();
+        for seq in seqs {
+            self.block_manager
+                .free(seq)
+                .unwrap_or_else(|e| panic!("Failed to preempt sequence: {e}"));
+            seq.status = SeqStatus::WAITING;
+        }
+    }
+
     fn generate_infer_inputs(&self) -> Vec<InferInput> {
         let mut infer_inputs: Vec<InferInput> = Vec::new();
 
@@ -127,9 +137,10 @@ impl Scheduler {
             if self.try_extend_infer_task(&mut infer_task, 1.0) {
                 allocated.push_back(infer_task);
             } else {
-                if let Some(preempt_task) = self.allocated.pop_back() {
+                if let Some(mut preempt_task) = self.allocated.pop_back() {
+                    self.preempt_infer_task(&mut preempt_task);
                     self.waiting.push_front(preempt_task);
-                    // TODO(jinu): Add request preemption.
+
                     self.allocated.push_front(infer_task);
                     continue;
                 } else {
