@@ -15,6 +15,7 @@ dependencies = [
     "transformers>4.47.1",
     "flashinfer-python>=0.2.5",
     "typer>=0.15.4",
+    "hf-xet>=1.1.2",
 ]
 
 [project.scripts]

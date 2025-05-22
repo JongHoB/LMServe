@@ -1,7 +1,9 @@
 import torch
+import os
+
 from typing import List
 
-from huggingface_hub import hf_api, hf_hub_download
+from huggingface_hub import hf_api, snapshot_download
 from safetensors.torch import load_file as load_safetensors
 
 
@@ -25,10 +27,26 @@ def _get_hf_weight_files(
     if len(weight_files) == 0:
         raise FileNotFoundError(f"No weight files found in {model_name}")
 
+    allow_patterns = [f"*{ext}" for ext in extensions]
+    try:
+        local_path = snapshot_download(
+            repo_id=model_name,
+            allow_patterns=allow_patterns,
+            local_files_only=True,
+        )
+        for fname in weight_files:
+            if not os.path.exists(os.path.join(local_path, fname)):
+                raise FileNotFoundError
+
+    except FileNotFoundError:
+        local_path = snapshot_download(
+            repo_id=model_name,
+            allow_patterns=allow_patterns,
+        )
+
     files: List[str] = []
     for fname in weight_files:
-        file = hf_hub_download(model_name, filename=fname)
-        files.append(file)
+        files.append(os.path.join(local_path, fname))
 
     return files
 
