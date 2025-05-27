@@ -151,6 +151,7 @@ async fn main() {
         args.max_batch_size,
         args.max_seq_len,
         args.max_num_batched_tokens,
+        args.tp_size,
     )
     .await
     .expect("Failed to start API Server");

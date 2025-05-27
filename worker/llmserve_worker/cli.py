@@ -6,6 +6,8 @@ import torch
 
 from loguru import logger
 
+from llmserve_worker import ModelWorker
+from llmserve_worker.dist_utils import init_distributed
 from llmserve_worker.pb import worker_pb2_grpc
 from llmserve_worker.pb.worker_pb2 import (
     WarmupRequest,
@@ -15,7 +17,6 @@ from llmserve_worker.pb.worker_pb2 import (
     InitCacheRequest,
     InitCacheResponse,
 )
-from llmserve_worker import ModelWorker
 
 app = typer.Typer()
 
@@ -76,7 +77,11 @@ class WorkerService(worker_pb2_grpc.WorkerServicer):
 def serve(
     model_name: str,
     block_size: int,
+    rank: int,
+    port: int,
 ):
+    logger.info(f"Launching {model_name} model on GPU {rank}...")
+    init_distributed()
     worker = ModelWorker(model_name, block_size)
 
     async def serve_inner(worker: ModelWorker):
@@ -84,9 +89,9 @@ def serve(
         server = grpc.aio.server()
         worker_pb2_grpc.add_WorkerServicer_to_server(WorkerService(worker),
                                                      server)
-        server.add_insecure_port('[::]:5000')
+        server.add_insecure_port(f'[::]:{port}')
 
-        logger.info("Model worker is ready and listening on port 5000.")
+        logger.info(f"Model worker is ready and listening on port {port}.")
 
         await server.start()
 

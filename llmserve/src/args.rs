@@ -13,7 +13,7 @@ pub struct LLMServeArgs {
     #[arg(long, default_value_t = 0.9)]
     pub gpu_memory_fraction: f32,
 
-    #[arg(long, default_value_t = 128)]
+    #[arg(long, default_value_t = 256)]
     pub max_batch_size: usize,
 
     #[arg(long, default_value_t = 4096)]
@@ -21,6 +21,9 @@ pub struct LLMServeArgs {
 
     #[arg(long, default_value_t = 5120)]
     pub max_num_batched_tokens: usize,
+
+    #[arg(long, default_value_t = 1)]
+    pub tp_size: u8,
 
     #[arg(long, default_value = "localhost")]
     pub address: String,

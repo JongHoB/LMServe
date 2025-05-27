@@ -4,90 +4,18 @@
 import torch
 import torch.nn as nn
 
-import math
-
 from typing import List, Tuple, Iterable, Optional
 
-from llmserve_worker.models.attention import Attention
-from llmserve_worker.models.activations import ACT2FN
+from llmserve_worker.models.parallel import (VocabParallelEmbedding,
+                                             ColumnParallelLinear,
+                                             RowParallelLinear)
+from llmserve_worker.models.parallel import (get_model_parallel_rank,
+                                             get_model_parallel_world_size)
+from llmserve_worker.models.utils import get_layer_type, load_weights
 from llmserve_worker.models.input_params import InputParams
-from llmserve_worker.ops.rotary_embedding_ops import rotary_pos_emb
-
-
-class Qwen2RotaryEmbedding(nn.Module):
-    def __init__(
-        self,
-        config,
-        base: int = 10000,
-    ) -> None:
-        super().__init__()
-
-        base = getattr(config, "rope_theta", base)
-        partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
-        self.rotary_dim = int(head_dim * partial_rotary_factor)
-        self.max_position_embeddings = config.max_position_embeddings
-        self.head_dim = head_dim
-
-        # Create cos and sin embeddings.
-        inv_freq = 1.0 / (base**(
-            torch.arange(0, self.rotary_dim, 2, dtype=torch.int64).float() /
-            self.rotary_dim))
-
-        if getattr(config, "rope_scaling", None) is not None:
-            factor = config.rope_scaling["factor"]
-            low_freq_factor = config.rope_scaling["low_freq_factor"]
-            high_freq_factor = config.rope_scaling["high_freq_factor"]
-            old_context_len = config.rope_scaling[
-                "original_max_position_embeddings"]
-
-            low_freq_wavelen = old_context_len / low_freq_factor
-            high_freq_wavelen = old_context_len / high_freq_factor
-
-            wavelen = 2 * math.pi / inv_freq
-            # wavelen < high_freq_wavelen: do nothing
-            # wavelen > low_freq_wavelen: divide by factor
-            inv_freq = torch.where(wavelen > low_freq_wavelen,
-                                   inv_freq / factor, inv_freq)
-            # otherwise: interpolate between the two, using a smooth factor
-            smooth_factor = (old_context_len / wavelen - low_freq_factor) / (
-                high_freq_factor - low_freq_factor)
-            smoothed_inv_freq = ((1 - smooth_factor) * inv_freq / factor +
-                                 smooth_factor * inv_freq)
-            is_medium_freq = (~(wavelen < high_freq_wavelen) *
-                              ~(wavelen > low_freq_wavelen))
-            inv_freq = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq)
-
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = inv_freq.device.type
-        with torch.autocast(device_type=device_type, enabled=False):
-            t = torch.arange(self.max_position_embeddings).float()
-            freqs = torch.einsum("i,j->ij", t, inv_freq.float())
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        cos = cos.to(dtype=config.torch_dtype)
-        sin = sin.to(dtype=config.torch_dtype)
-        cos_sin = torch.cat((cos, sin), dim=-1)
-
-        self.register_buffer("cos_sin_cached", cos_sin, persistent=False)
-
-    def forward(
-            self,
-            query: torch.Tensor,  # [num_tokens, num_heads, head_size]
-            key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
-            positions: torch.Tensor,  # [num_tokens]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        query, key = rotary_pos_emb(
-            query,
-            key,
-            positions,
-            self.cos_sin_cached,
-            self.head_dim
-        )
-        return query, key
+from llmserve_worker.models.layers.activations import ACT2FN
+from llmserve_worker.models.layers.attention import Attention
+from llmserve_worker.models.layers import RotaryEmbedding
 
 
 class Qwen2RMSNorm(nn.Module):
@@ -110,15 +38,24 @@ class Qwen2MLP(nn.Module):
         config,
     ):
         super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size,
-                                   config.intermediate_size,
-                                   bias=False)
-        self.up_proj = nn.Linear(config.hidden_size,
-                                 config.intermediate_size,
-                                 bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size,
-                                   config.hidden_size,
-                                   bias=False)
+        self.gate_proj = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.up_proj = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.down_proj = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            bias=False,
+            input_is_parallel=True,
+        )
         self.activation_fn = ACT2FN[config.hidden_act]
 
     def forward(self, hidden_states):
@@ -134,22 +71,46 @@ class Qwen2Attention(nn.Module):
         hidden_size = config.hidden_size
         num_heads = config.num_attention_heads
         num_kv_heads = config.num_key_value_heads
+        tp_size = get_model_parallel_world_size()
+
+        assert hidden_size % num_heads == 0
+        assert num_heads % num_kv_heads == 0
+        assert num_heads % tp_size == 0
+        assert num_kv_heads % tp_size == 0
 
         self.hidden_size = hidden_size
-        assert num_heads % num_kv_heads == 0
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
-        assert hidden_size % num_heads == 0
+        self.num_heads = num_heads // tp_size
+        self.num_kv_heads = num_kv_heads // tp_size
         self.head_dim = hidden_size // num_heads
         self.q_size = num_heads * self.head_dim
         self.kv_size = num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        self.q_proj = nn.Linear(hidden_size, self.q_size, bias=True)
-        self.k_proj = nn.Linear(hidden_size, self.kv_size, bias=True)
-        self.v_proj = nn.Linear(hidden_size, self.kv_size, bias=True)
-        self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.rotary_emb = Qwen2RotaryEmbedding(config=config)
+        self.q_proj = ColumnParallelLinear(
+            hidden_size,
+            self.q_size,
+            bias=True,
+            gather_output=False,
+        )
+        self.k_proj = ColumnParallelLinear(
+            hidden_size,
+            self.kv_size,
+            bias=True,
+            gather_output=False,
+        )
+        self.v_proj = ColumnParallelLinear(
+            hidden_size,
+            self.kv_size,
+            bias=True,
+            gather_output=False,
+        )
+        self.o_proj = RowParallelLinear(
+            hidden_size,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+        )
+        self.rotary_emb = RotaryEmbedding(config=config)
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -232,7 +193,8 @@ class Qwen2Model(nn.Module):
         self.config = config
         self.padding_idx = config.pad_token_id
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                   config.hidden_size)
         self.layers = nn.ModuleList([
             Qwen2DecoderLayer(config) for _ in range(config.num_hidden_layers)
         ])
@@ -261,10 +223,11 @@ class Qwen2ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = Qwen2Model(config)
-        self.lm_head = nn.Linear(
+        self.lm_head = ColumnParallelLinear(
             config.hidden_size,
             config.vocab_size,
             bias=False,
+            gather_output=True,
         )
 
     def forward(
@@ -284,49 +247,17 @@ class Qwen2ForCausalLM(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        tensor_model_parallel_rank = get_model_parallel_rank()
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            params_dict[name].data.copy_(loaded_weight)
+            load_weights(
+                params_dict[name],
+                loaded_weight,
+                get_layer_type(self, name),
+                tensor_model_parallel_rank,
+            )
 
         if self.config.tie_word_embeddings:
             self.lm_head.weight.data.copy_(self.model.embed_tokens.weight)
-
-
-class Qwen2ForProcessRewardModel(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.num_labels = 2
-        self.config = config
-        self.model = Qwen2Model(config)
-        self.score = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size),
-            nn.ReLU(),
-            nn.Linear(config.hidden_size, self.num_labels)
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        input_params: InputParams,
-        kv_caches: Optional[List[Tuple[torch.Tensor]]] = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids=input_ids,
-            input_params=input_params,
-            kv_caches=kv_caches,
-        )
-        logits = self.score(hidden_states)
-
-        return logits
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "lm_head.weight" in name:
-                continue
-            params_dict[name].data.copy_(loaded_weight)

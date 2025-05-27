@@ -6,11 +6,13 @@ from llmserve_worker.models.opt import OPTForCausalLM
 from llmserve_worker.models.llama import LlamaForCausalLM
 from llmserve_worker.models.qwen2 import Qwen2ForCausalLM
 from llmserve_worker.models.utils import hf_weight_iter
+from llmserve_worker.models.parallel import get_model_parallel_world_size
 from transformers import AutoConfig
 
 
 class ModelConfig:
-    def __init__(self, model_name) -> None:
+
+    def __init__(self, model_name: str) -> None:
         self.model_name = model_name
 
         tf_config = AutoConfig.from_pretrained(self.model_name,
@@ -18,9 +20,22 @@ class ModelConfig:
         self.model_type = tf_config.model_type
         self.num_layers = tf_config.num_hidden_layers
         self.hidden_size = tf_config.hidden_size
-        self.num_heads = tf_config.num_attention_heads
-        self.num_kv_heads = getattr(tf_config, "num_key_value_heads", self.num_heads)
-        self.head_dim = self.hidden_size // self.num_heads
+        orig_num_heads = tf_config.num_attention_heads
+        orig_num_kv_heads = getattr(tf_config, "num_key_value_heads",
+                                    orig_num_heads)
+        self.head_dim = self.hidden_size // orig_num_heads
+
+        tp_size = get_model_parallel_world_size()
+        assert orig_num_heads % tp_size == 0, \
+            f"number of q heads ({orig_num_heads}) is not divisible by" \
+            f"parallel size ({tp_size})"
+        self.num_heads = orig_num_heads // tp_size
+
+        assert orig_num_kv_heads % tp_size == 0, \
+            f"number of kv heads ({orig_num_kv_heads}) is not divisible by" \
+            f"parallel size ({tp_size})"
+        self.num_kv_heads = orig_num_kv_heads // tp_size
+
         self.dtype = getattr(tf_config, "torch_dtype", torch.float16)
         self.tf_config = tf_config
 

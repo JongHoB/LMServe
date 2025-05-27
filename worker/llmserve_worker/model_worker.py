@@ -128,7 +128,13 @@ def build_decode_wrapper(
 
 
 class ModelWorker:
-    def __init__(self, model_name: str, block_size: int, tokenizer=None):
+
+    def __init__(
+        self,
+        model_name: str,
+        block_size: int,
+        tokenizer=None,
+    ):
         self.model_config = ModelConfig(model_name)
         self.model = get_model(self.model_config)
 

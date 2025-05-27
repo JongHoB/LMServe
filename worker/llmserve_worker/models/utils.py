@@ -1,10 +1,24 @@
 import torch
 import os
+import re
 
 from typing import List
 
 from huggingface_hub import hf_api, snapshot_download
 from safetensors.torch import load_file as load_safetensors
+
+
+def get_layer_type(model, param_name):
+    layer_name = re.sub(r"\.(weight|bias)$", "", param_name)
+
+    def rgetattr(obj, attr):
+        for name in attr.split('.'):
+            obj = getattr(obj, name)
+        return obj
+
+    layer_type = type(rgetattr(model, layer_name)).__name__
+
+    return layer_type
 
 
 def _get_hf_weight_files(
@@ -68,3 +82,27 @@ def hf_weight_iter(model_name: str):
 
         for name, param in state.items():
             yield name, param
+
+
+def load_weights(
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    layer_type: str,
+    tensor_model_parallel_rank: int,
+) -> None:
+    if layer_type in ["VocabParallelEmbedding", "ColumnParallelLinear"]:
+        shard_size = param.shape[0]
+        start_idx = tensor_model_parallel_rank * shard_size
+        end_idx = (tensor_model_parallel_rank + 1) * shard_size
+        loaded_weight = loaded_weight[start_idx:end_idx]
+
+    elif layer_type in ["RowParallelLinear"]:
+        shard_size = param.shape[1]
+        start_idx = tensor_model_parallel_rank * shard_size
+        end_idx = (tensor_model_parallel_rank + 1) * shard_size
+        loaded_weight = loaded_weight[:, start_idx:end_idx]
+
+    assert param.shape == loaded_weight.shape, (
+        f"Tensor shape mismatch between model and checkpoint: "
+        f"{param.shape} != {loaded_weight.shape}")
+    param.data.copy_(loaded_weight)

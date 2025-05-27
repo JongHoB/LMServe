@@ -3,9 +3,15 @@ from torch import nn
 
 from typing import List, Tuple, Iterable, Optional
 
-from llmserve_worker.models.attention import Attention
-from llmserve_worker.models.activations import ACT2FN
+from llmserve_worker.models.parallel import (VocabParallelEmbedding,
+                                             ColumnParallelLinear,
+                                             RowParallelLinear)
+from llmserve_worker.models.parallel import (get_model_parallel_rank,
+                                             get_model_parallel_world_size)
+from llmserve_worker.models.utils import get_layer_type, load_weights
 from llmserve_worker.models.input_params import InputParams
+from llmserve_worker.models.layers.activations import ACT2FN
+from llmserve_worker.models.layers.attention import Attention
 
 
 class OPTPositionalEmbedding(nn.Embedding):
@@ -24,9 +30,13 @@ class OPTAttention(nn.Module):
         super().__init__()
         hidden_size = config.hidden_size
         num_heads = config.num_attention_heads
+        tp_size = get_model_parallel_world_size()
+
+        assert hidden_size % num_heads == 0
+        assert num_heads % tp_size == 0
 
         self.hidden_size = hidden_size
-        self.num_heads = num_heads
+        self.num_heads = num_heads // tp_size
         self.head_dim = hidden_size // num_heads
 
         if (self.head_dim * num_heads) != self.hidden_size:
@@ -36,10 +46,30 @@ class OPTAttention(nn.Module):
                 f"{num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
-        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
-        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
-        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
+        self.q_proj = ColumnParallelLinear(
+            hidden_size,
+            self.q_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.k_proj = ColumnParallelLinear(
+            hidden_size,
+            self.kv_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.v_proj = ColumnParallelLinear(
+            hidden_size,
+            self.kv_size,
+            bias=False,
+            gather_output=False,
+        )
+        self.o_proj = RowParallelLinear(
+            hidden_size,
+            hidden_size,
+            bias=False,
+            input_is_parallel=True,
+        )
 
         self.attn = Attention(
             self.num_heads,
@@ -83,15 +113,17 @@ class OPTDecoderLayer(nn.Module):
             self.hidden_size,
             elementwise_affine=config.layer_norm_elementwise_affine,
         )
-        self.fc1 = nn.Linear(
-            self.hidden_size,
+        self.fc1 = ColumnParallelLinear(
+            self.embed_dim,
             config.ffn_dim,
             bias=config.enable_bias,
+            gather_output=False,
         )
-        self.fc2 = nn.Linear(
+        self.fc2 = RowParallelLinear(
             config.ffn_dim,
-            self.hidden_size,
+            self.embed_dim,
             bias=config.enable_bias,
+            input_is_parallel=True,
         )
         self.final_layer_norm = nn.LayerNorm(
             self.hidden_size,
@@ -149,7 +181,7 @@ class OPTDecoder(nn.Module):
         self.max_target_positions = config.max_position_embeddings
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(
+        self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.word_embed_proj_dim,
         )
@@ -249,7 +281,12 @@ class OPTForCausalLM(nn.Module):
         self.config = config
         self.model = OPTModel(config)
 
-        self.lm_head = self.model.decoder.embed_tokens.weight
+        self.lm_head = ColumnParallelLinear(
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
+            gather_output=True,
+        )
 
     def forward(
         self,
@@ -263,16 +300,25 @@ class OPTForCausalLM(nn.Module):
             kv_caches=kv_caches,
         )
 
-        logits = torch.matmul(hidden_states, self.lm_head.t())
+        logits = self.lm_head(hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        tensor_model_parallel_rank = get_model_parallel_rank()
 
         for name, loaded_weight in weights:
             if "lm_head.weight" in name and self.config.tie_word_embeddings:
                 continue
+
             if name.startswith("decoder."):
                 name = "model." + name
 
-            params_dict[name].data.copy_(loaded_weight)
+            load_weights(
+                params_dict[name],
+                loaded_weight,
+                get_layer_type(self, name),
+                tensor_model_parallel_rank,
+            )
+
+        self.lm_head.weight.data.copy_(self.model.embed_tokens.weight)
