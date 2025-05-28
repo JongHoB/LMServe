@@ -6,7 +6,6 @@ use tracing::info;
 use crate::block_manager::BlockManager;
 use crate::infer_task::{InferInput, InferOutput, InferTask};
 use crate::sequence::{SeqStatus, Sequence};
-use crate::utils::now;
 
 pub struct Scheduler {
     pub max_batch_size: usize,
@@ -164,7 +163,7 @@ impl Scheduler {
 
         {
             // Logging
-            let now = now();
+            let now = utils::time::now();
 
             if now > self.last_log_time + 5e9 as u64 {
                 info!(

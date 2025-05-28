@@ -1,5 +1,3 @@
-use crate::utils;
-
 #[derive(PartialEq, Eq)]
 pub enum SeqStatus {
     WAITING,
@@ -44,7 +42,7 @@ impl Sequence {
         max_output_len: Option<usize>,
         ignore_eos: bool,
     ) -> Sequence {
-        let seq_id = utils::generate_seq_id();
+        let seq_id = utils::random::generate_seq_id();
         let prompt_len = token_ids.len();
 
         Sequence {
@@ -82,6 +80,10 @@ impl Sequence {
 
     pub fn get_token_probs(&self) -> Vec<f32> {
         self.output_token_probs.clone()
+    }
+
+    pub fn get_output_words(&self) -> Vec<String> {
+        self.output_words.clone()
     }
 
     pub fn append_output_id(&mut self, output_id: u32, prob: f32, output_word: String) {

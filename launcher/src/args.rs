@@ -3,7 +3,7 @@ use serde::Serialize;
 
 #[derive(Parser, Debug, Serialize)]
 #[command(author, version, about)]
-pub struct LLMEngineArgs {
+pub struct LauncherArgs {
     #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
     pub model_name: String,
 
@@ -26,6 +26,9 @@ pub struct LLMEngineArgs {
     #[arg(long, default_value_t = 1)]
     pub tp_size: u8,
 
-    #[arg(short, long, default_value_t = 7000)]
+    #[arg(long, default_value = "localhost")]
+    pub address: String,
+
+    #[arg(short, long, default_value_t = 8000)]
     pub port: u32,
 }

@@ -7,12 +7,9 @@ fn main() {
     tonic_build::configure()
         .protoc_arg("--experimental_allow_proto3_optional")
         .build_client(true)
-        .build_server(true)
+        .build_server(false)
         .out_dir("src/pb")
         .include_file("mod.rs")
-        .compile(
-            &["../proto/worker.proto", "../proto/llm.proto"],
-            &["../proto"],
-        )
+        .compile(&["../proto/llm.proto"], &["../proto"])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
 }

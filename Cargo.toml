@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["llmserve"]
+members = [ "api_server", "utils", "launcher", "llmserve" ]
