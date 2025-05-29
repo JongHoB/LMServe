@@ -14,7 +14,6 @@ impl FormatTime for Date {
 
 pub fn init_tracing() {
     tracing_subscriber::fmt::Subscriber::builder()
-        .with_max_level(tracing::Level::INFO)
         .with_timer(Date)
         .with_target(true)
         .init();

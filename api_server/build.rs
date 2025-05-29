@@ -10,6 +10,6 @@ fn main() {
         .build_server(false)
         .out_dir("src/pb")
         .include_file("mod.rs")
-        .compile(&["../proto/llm.proto"], &["../proto"])
+        .compile_protos(&["../proto/llm.proto"], &["../proto"])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
 }

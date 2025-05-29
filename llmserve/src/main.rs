@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use tokio::sync::Notify;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -53,15 +52,6 @@ impl Llm for LLMService {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     utils::logging::init_tracing();
 
-    let shutdown_notify = Arc::new(Notify::new());
-    let shutdown_signal = shutdown_notify.clone();
-
-    tokio::spawn(async move {
-        let shutdown_notify = shutdown_notify.clone();
-        utils::signal_handler::wait_shutdown_signal().await;
-        shutdown_notify.notify_waiters();
-    });
-
     let args = LLMEngineArgs::parse();
 
     let address = format!("[::1]:{}", args.port).parse().unwrap();
@@ -96,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Server::builder()
         .add_service(svc)
-        .serve_with_shutdown(address, async move { shutdown_signal.notified().await })
+        .serve_with_shutdown(address, utils::signal_handler::wait_shutdown_signal())
         .await?;
 
     Ok(())

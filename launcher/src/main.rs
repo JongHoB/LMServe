@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::process::{Child, Command};
-use tracing::info;
 
 use clap::Parser;
 use serde::Serialize;
@@ -8,13 +10,6 @@ use serde_json::Value;
 use api_server::args::APIServerArgs;
 use launcher::args::LauncherArgs;
 use llmserve::args::LLMEngineArgs;
-
-fn spawn_process(path: &str, args: &[String]) -> std::io::Result<Child> {
-    info!("Launching {}...", path);
-    let child = Command::new(path).args(args).spawn()?;
-
-    Ok(child)
-}
 
 fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
     let value = serde_json::to_value(args).expect("serialization failed");
@@ -44,6 +39,11 @@ fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
 
 const LLMSERVE_BASE_PORT: u32 = 7000;
 
+const WORKER_UDS_PATH_PREFIX: &str = "/tmp/llmserve/worker";
+
+const MASTER_ADDR: &str = "localhost";
+const MASTER_PORT: u32 = 6000;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     utils::logging::init_tracing();
@@ -51,6 +51,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = LauncherArgs::parse();
 
     let model_name = args.model_name;
+
+    let mut workers: Vec<Child> = Vec::new();
+    std::fs::create_dir_all(Path::new(WORKER_UDS_PATH_PREFIX).parent().unwrap())?;
+
+    for rank in 0..args.tp_size {
+        let uds_path = format!("{}-{}", WORKER_UDS_PATH_PREFIX, rank);
+        if Path::new(&uds_path).exists() {
+            fs::remove_file(Path::new(&uds_path))
+                .expect("Failed to remove existing UDS socket file");
+        }
+
+        let worker_args = vec![
+            model_name.clone(),
+            args.block_size.to_string(),
+            /*device=*/ workers.len().to_string(),
+            uds_path.to_string(),
+        ];
+
+        let mut worker_envs = HashMap::new();
+        worker_envs.insert("RANK", rank.to_string());
+        worker_envs.insert("WORLD_SIZE", args.tp_size.to_string());
+        worker_envs.insert("MASTER_ADDR", MASTER_ADDR.to_string());
+        worker_envs.insert("MASTER_PORT", MASTER_PORT.to_string());
+
+        let worker = Command::new("llmserve-worker")
+            .args(worker_args)
+            .envs(worker_envs)
+            .spawn()?;
+        workers.push(worker);
+    }
 
     let engine_args = LLMEngineArgs {
         model_name: model_name.clone(),
@@ -63,7 +93,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port: LLMSERVE_BASE_PORT,
     };
 
-    let mut llmserve = spawn_process("llmserve", &to_cmd_args(&engine_args))?;
+    let mut engine_envs = HashMap::new();
+    engine_envs.insert("WORKER_UDS_PATH_PREFIX", WORKER_UDS_PATH_PREFIX);
+
+    let mut llmserve = Command::new("llmserve")
+        .args(&to_cmd_args(&engine_args))
+        .envs(engine_envs)
+        .spawn()?;
 
     let engine_url = format!("http://[::1]:{}", engine_args.port);
 
@@ -74,10 +110,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port: args.port,
     };
 
-    let mut api_server = spawn_process("api_server", &to_cmd_args(&api_server_args))?;
+    let mut api_server = Command::new("api_server")
+        .args(&to_cmd_args(&api_server_args))
+        .spawn()?;
 
     utils::signal_handler::wait_shutdown_signal().await;
 
+    for mut worker in workers {
+        worker.wait()?;
+    }
     api_server.wait()?;
     llmserve.wait()?;
 

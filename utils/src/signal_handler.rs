@@ -1,4 +1,3 @@
-use tracing::info;
 use tokio::signal;
 
 pub async fn wait_shutdown_signal() {
@@ -20,6 +19,4 @@ pub async fn wait_shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     };
-
-    info!("signal received, starting graceful shutdown.");
 }

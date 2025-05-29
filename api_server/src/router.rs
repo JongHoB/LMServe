@@ -31,7 +31,7 @@ impl EngineRouter {
                     break client;
                 }
                 Err(error) => {
-                    debug!("Waiting for engine server ({url}) to be ready: {error})");
+                    debug!("Trying to connect to engine server ({}): {:?}", url, error);
                 }
             };
 

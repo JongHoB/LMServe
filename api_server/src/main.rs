@@ -119,4 +119,6 @@ async fn main() {
         .with_graceful_shutdown(utils::signal_handler::wait_shutdown_signal())
         .await
         .unwrap();
+
+    info!("API Server terminated.");
 }

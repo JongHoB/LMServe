@@ -1,14 +1,8 @@
 use std::{
     collections::HashMap,
-    os::unix::process::CommandExt,
-    process::{Child, Command},
     sync::Arc,
     time::Duration,
-};
-
-use nix::{
-    sys::signal::{Signal, killpg},
-    unistd::Pid,
+    env,
 };
 
 use futures::future::join_all;
@@ -17,7 +11,7 @@ use tokio::{sync::Mutex, time::sleep};
 
 use tonic::transport::Channel;
 
-use tracing::{error, info};
+use tracing::{debug, info};
 
 use crate::infer_task::{InferInput, InferOutput};
 use crate::pb::worker::worker_client::WorkerClient;
@@ -25,9 +19,6 @@ use crate::pb::worker::{InferRequest, InitCacheRequest, WarmupRequest};
 
 type StdError = Box<dyn std::error::Error + Send + Sync + 'static>;
 type Result<T, E = StdError> = std::result::Result<T, E>;
-
-const MASTER_ADDR: &str = "localhost";
-const MASTER_PORT: u32 = 6000;
 
 fn extract_if_all_equal<T>(items: &[T]) -> Result<T, &'static str>
 where
@@ -49,15 +40,17 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub async fn connect(port: u32) -> Result<Worker> {
-        info!("Waiting for model worker to be ready...");
+    pub async fn connect(address: String) -> Result<Worker> {
+        // TODO(jinu): Add timeout.
         let client = loop {
-            match WorkerClient::connect(format!("http://[::1]:{port}")).await {
+            match WorkerClient::connect(address.clone()).await {
                 Ok(client) => {
                     info!("Successfully connected to the worker.");
                     break client;
                 }
-                Err(_) => {}
+                Err(error) => {
+                    debug!("Trying to connect to worker ({}): {:?}", address, error);
+                }
             };
 
             sleep(Duration::from_millis(500)).await;
@@ -87,83 +80,26 @@ impl Worker {
     }
 }
 
-pub struct WorkerHandle {
-    child: Child,
-}
-
-impl Drop for WorkerHandle {
-    fn drop(&mut self) {
-        let pid = self.child.id();
-        let result = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
-        match result {
-            Ok(_) => {
-                let _ = self.child.wait();
-                info!("Successfully terminated worker (pid={pid}).")
-            }
-            Err(err) => error!("Failed to terminate worker (pid={pid}): {err}"),
-        }
-    }
-}
-
 #[allow(dead_code)]
 pub struct WorkerGroup {
-    worker_handles: Vec<WorkerHandle>,
     workers: Vec<Arc<Worker>>,
 }
 
 impl WorkerGroup {
     pub async fn init(
-        model_name: String,
-        block_size: usize,
         num_workers: u8,
-        base_port: u32,
     ) -> Result<WorkerGroup> {
-        let worker_handles = WorkerGroup::launch(model_name, block_size, num_workers, base_port)?;
         let mut workers: Vec<_> = Vec::with_capacity(num_workers as usize);
+        let uds_path_prefix = env::var("WORKER_UDS_PATH_PREFIX")?;
         for rank in 0..num_workers {
-            let port = base_port + rank as u32;
-            let worker = Worker::connect(port)
+            let address = format!("unix://{}-{}", uds_path_prefix, rank);
+            let worker = Worker::connect(address.parse().unwrap())
                 .await
                 .unwrap_or_else(|e| panic!("Failed to connect worker: {e}"));
             workers.push(Arc::new(worker));
         }
 
-        Ok(WorkerGroup {
-            worker_handles,
-            workers,
-        })
-    }
-
-    fn launch(
-        model_name: String,
-        block_size: usize,
-        num_workers: u8,
-        base_port: u32,
-    ) -> Result<Vec<WorkerHandle>> {
-        let mut worker_handles: Vec<WorkerHandle> = Vec::with_capacity(num_workers as usize);
-        for rank in 0..num_workers {
-            let port = base_port + rank as u32;
-            let args = vec![
-                model_name.clone(),
-                block_size.to_string(),
-                rank.to_string(),
-                port.to_string(),
-            ];
-            let mut envs = HashMap::new();
-            envs.insert("RANK", rank.to_string());
-            envs.insert("WORLD_SIZE", num_workers.to_string());
-            envs.insert("MASTER_ADDR", MASTER_ADDR.to_string());
-            envs.insert("MASTER_PORT", MASTER_PORT.to_string());
-            let worker_handle = WorkerHandle {
-                child: Command::new("llmserve-worker")
-                    .args(args)
-                    .process_group(0)
-                    .envs(envs)
-                    .spawn()?,
-            };
-            worker_handles.push(worker_handle);
-        }
-        Ok(worker_handles)
+        Ok(WorkerGroup { workers })
     }
 
     pub async fn warmup(

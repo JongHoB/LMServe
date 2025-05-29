@@ -10,8 +10,6 @@ use crate::scheduler::Scheduler;
 use crate::sequence::{SeqStatus, Sequence};
 use crate::worker::WorkerGroup;
 
-const WORKER_BASE_PORT: u32 = 5000;
-
 pub fn norm_log_probs(probs: &[f32]) -> f32 {
     let log_sum: f32 = probs
         .iter()
@@ -48,10 +46,9 @@ impl LLMEngine {
         max_num_batched_tokens: usize,
         tp_size: u8,
     ) -> Result<LLMEngine> {
-        let worker_group =
-            WorkerGroup::init(model_name.clone(), block_size, tp_size, WORKER_BASE_PORT)
-                .await
-                .unwrap_or_else(|e| panic!("Failed to initialize worker group: {e}"));
+        let worker_group = WorkerGroup::init(tp_size)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to initialize worker group: {e}"));
 
         let (total, peak) = worker_group
             .warmup(max_batch_size, max_seq_len, max_num_batched_tokens)

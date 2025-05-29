@@ -10,7 +10,7 @@ fn main() {
         .build_server(true)
         .out_dir("src/pb")
         .include_file("mod.rs")
-        .compile(
+        .compile_protos(
             &["../proto/worker.proto", "../proto/llm.proto"],
             &["../proto"],
         )

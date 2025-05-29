@@ -1,3 +1,4 @@
+import os
 import typer
 import grpc
 import asyncio
@@ -77,21 +78,25 @@ class WorkerService(worker_pb2_grpc.WorkerServicer):
 def serve(
     model_name: str,
     block_size: int,
-    rank: int,
-    port: int,
+    device: int,
+    uds_path: str,
 ):
-    logger.info(f"Launching {model_name} model on GPU {rank}...")
+    torch.cuda.set_device(device)
+
     init_distributed()
+
+    logger.info(f"Launching {model_name} model on GPU {device}...")
     worker = ModelWorker(model_name, block_size)
 
-    async def serve_inner(worker: ModelWorker):
+    async def serve_inner(worker: ModelWorker, uds_path: str):
 
         server = grpc.aio.server()
         worker_pb2_grpc.add_WorkerServicer_to_server(WorkerService(worker),
                                                      server)
-        server.add_insecure_port(f'[::]:{port}')
+        address = f"unix://{uds_path}"
+        server.add_insecure_port(address)
 
-        logger.info(f"Model worker is ready and listening on port {port}.")
+        logger.info(f"Model worker is ready and listening on: {address}")
 
         await server.start()
 
@@ -109,7 +114,7 @@ def serve(
 
         logger.info("Shutting the model worker.")
 
-    asyncio.run(serve_inner(worker))
+    asyncio.run(serve_inner(worker, uds_path))
 
 
 if __name__ == "__main__":
