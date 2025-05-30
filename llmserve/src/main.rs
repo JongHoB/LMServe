@@ -9,14 +9,22 @@ use tracing::debug;
 use llmserve::args::LLMEngineArgs;
 use llmserve::engine::LLMEngineWrapper;
 use llmserve::pb::llm::llm_server::{Llm, LlmServer};
-use llmserve::pb::llm::{GenerateRequest, GenerateResponse};
+use llmserve::pb::llm::{GenerateRequest, GenerateResponse, GetKindResponse};
 
 pub struct LLMService {
+    kind: String,
     engine: Arc<LLMEngineWrapper>,
 }
 
 #[tonic::async_trait]
 impl Llm for LLMService {
+    #[allow(unused_variables)]
+    async fn get_kind(&self, request: Request<()>) -> Result<Response<GetKindResponse>, Status> {
+        Ok(Response::new(GetKindResponse {
+            kind: self.kind.clone(),
+        }))
+    }
+
     async fn generate(
         &self,
         request: Request<GenerateRequest>,
@@ -54,7 +62,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = LLMEngineArgs::parse();
 
-    let address = format!("[::1]:{}", args.port).parse().unwrap();
+    let address = args.address.parse().unwrap_or_else(|_| {
+        panic!(
+            "Invalid address '{}'. Expected format: <host>:<port>",
+            &args.address
+        )
+    });
 
     let engine = Arc::new(
         LLMEngineWrapper::new(
@@ -71,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let llm_service = LLMService {
+        kind: args.kind,
         engine: engine.clone(),
     };
 

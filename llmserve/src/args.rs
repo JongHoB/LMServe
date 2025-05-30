@@ -4,6 +4,9 @@ use serde::Serialize;
 #[derive(Parser, Debug, Serialize)]
 #[command(author, version, about)]
 pub struct LLMEngineArgs {
+    #[arg(long, default_value = "full")]
+    pub kind: String,
+
     #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
     pub model_name: String,
 
@@ -26,6 +29,6 @@ pub struct LLMEngineArgs {
     #[arg(long, default_value_t = 1)]
     pub tp_size: u8,
 
-    #[arg(short, long, default_value_t = 7000)]
-    pub port: u32,
+    #[arg(long, default_value = "127.0.0.1:7000")]
+    pub address: String,
 }

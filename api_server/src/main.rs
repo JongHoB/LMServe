@@ -75,25 +75,27 @@ impl APIServer {
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() {
+async fn main() -> Result<()> {
     utils::logging::init_tracing();
 
     let args = APIServerArgs::parse();
 
-    let socket_addr = format!("{}:{}", args.address, args.port);
+    let socket_addr = args.address;
+
     let url = format!("http://{}", socket_addr);
 
     let tokenizer =
-        Tokenizer::from_pretrained(&args.tokenier_name, None).expect("Failed to load tokenizer");
+        Tokenizer::from_pretrained(&args.model_name, None).expect("Failed to load tokenizer");
 
     let mut engine_router = EngineRouter::new();
-    for engine_url in args.engine_urls.iter() {
+    for addr in args.llm_server_addresses.iter() {
+        let llm_server_url = format!("http://{}", addr);
         let _ = engine_router
-            .add_node(engine_url)
+            .add_node(&llm_server_url)
             .await
-            .unwrap_or_else(|e| {
-                panic!("Unable to establish connection to engine ({engine_url}): {e}")
-            });
+            .unwrap_or_else(|e| panic!("Unable to establish connection to engine ({addr}): {e}"));
+
+        info!("Successfully connected to LLM server at {}", addr);
     }
 
     let api_server = Arc::new(APIServer::new(engine_router, tokenizer));
@@ -121,4 +123,6 @@ async fn main() {
         .unwrap();
 
     info!("API Server terminated.");
+
+    Ok(())
 }

@@ -1,18 +1,20 @@
 use clap::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Parser, Debug, Serialize)]
+#[derive(Parser, Debug, Serialize, Deserialize)]
 #[command(author, version, about)]
 pub struct APIServerArgs {
     #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
-    pub tokenier_name: String,
+    pub model_name: String,
 
-    #[arg(long, default_values_t = vec!["http://[::1]:7000".to_string()])]
-    pub engine_urls: Vec<String>,
-
-    #[arg(long, default_value = "localhost")]
+    #[arg(long, default_value = "127.0.0.1:8000")]
     pub address: String,
 
-    #[arg(short, long, default_value_t = 8000)]
-    pub port: u32,
+    #[arg(
+        long,
+        value_delimiter = ' ',
+        num_args = 1..,
+        default_values_t = vec!["127.0.0.1:7000".to_string()]
+    )]
+    pub llm_server_addresses: Vec<String>,
 }

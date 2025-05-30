@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::Duration,
-    env,
-};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use futures::future::join_all;
 
@@ -86,13 +81,12 @@ pub struct WorkerGroup {
 }
 
 impl WorkerGroup {
-    pub async fn init(
-        num_workers: u8,
-    ) -> Result<WorkerGroup> {
+    pub async fn init(num_workers: u8) -> Result<WorkerGroup> {
         let mut workers: Vec<_> = Vec::with_capacity(num_workers as usize);
-        let uds_path_prefix = env::var("WORKER_UDS_PATH_PREFIX")?;
+        let worker_group_uds_path =
+            env::var("WORKER_GROUP_UDS_PATH").expect("WORKER_GROUP_UDS_PATH env is not set");
         for rank in 0..num_workers {
-            let address = format!("unix://{}-{}", uds_path_prefix, rank);
+            let address = format!("unix://{}/{}", worker_group_uds_path, rank);
             let worker = Worker::connect(address.parse().unwrap())
                 .await
                 .unwrap_or_else(|e| panic!("Failed to connect worker: {e}"));

@@ -1,8 +1,7 @@
 use std::fmt;
 
 use chrono::Local;
-use tracing_subscriber::fmt::format::Writer;
-use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::{EnvFilter, fmt::format::Writer, fmt::time::FormatTime};
 
 struct Date;
 
@@ -16,5 +15,8 @@ pub fn init_tracing() {
     tracing_subscriber::fmt::Subscriber::builder()
         .with_timer(Date)
         .with_target(true)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 }

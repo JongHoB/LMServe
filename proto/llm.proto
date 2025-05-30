@@ -1,9 +1,16 @@
 syntax = "proto3";
 
+import "google/protobuf/empty.proto";
+
 package LLM;
 
 service LLM {
+  rpc get_kind(google.protobuf.Empty) returns (GetKindResponse);
   rpc generate(GenerateRequest) returns (GenerateResponse);
+}
+
+message GetKindResponse {
+  string kind = 1;
 }
 
 message GenerateRequest {
