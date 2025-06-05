@@ -2,7 +2,7 @@ import torch
 import os
 import re
 
-from typing import List
+from typing import List, Optional
 
 from huggingface_hub import hf_api, snapshot_download
 from safetensors.torch import load_file as load_safetensors
@@ -106,3 +106,24 @@ def load_weights(
         f"Tensor shape mismatch between model and checkpoint: "
         f"{param.shape} != {loaded_weight.shape}")
     param.data.copy_(loaded_weight)
+
+
+def travel_layers(
+    mod: torch.nn.Module,
+    includes: Optional[List[str]] = None,
+):
+    layers = []
+    if len(list(mod.children())) == 0:
+        if includes is not None:
+            for include in includes:
+                if include.lower() in mod.__class__.__name__.lower():
+                    return [mod]
+            else:
+                return []
+
+        return [mod]
+    else:
+        for i, (name, child) in enumerate(mod.named_children()):
+            layers += travel_layers(child, includes)
+
+        return layers

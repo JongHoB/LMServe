@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::join;
 use tokio::sync::{Mutex, Notify};
 use tracing::info;
 
 use crate::infer_task::InferTask;
 use crate::scheduler::Scheduler;
 use crate::sequence::{SeqStatus, Sequence};
-use crate::worker::WorkerGroup;
+use crate::worker::{KVWorkerGroup, ModelWorkerGroup};
 
 pub fn norm_log_probs(probs: &[f32]) -> f32 {
     let log_sum: f32 = probs
@@ -30,7 +31,9 @@ pub struct LLMEngine {
 
     tp_size: u8,
 
-    worker_group: WorkerGroup,
+    model_worker_group: ModelWorkerGroup,
+    kv_worker_group: KVWorkerGroup,
+
     scheduler: Arc<Mutex<Scheduler>>,
 
     last_log_time: u64,
@@ -46,11 +49,11 @@ impl LLMEngine {
         max_num_batched_tokens: usize,
         tp_size: u8,
     ) -> Result<LLMEngine> {
-        let worker_group = WorkerGroup::init(tp_size)
+        let model_worker_group = ModelWorkerGroup::init(tp_size)
             .await
-            .unwrap_or_else(|e| panic!("Failed to initialize worker group: {e}"));
+            .unwrap_or_else(|e| panic!("Failed to initialize model worker group: {e}"));
 
-        let (total, peak) = worker_group
+        let (total, peak) = model_worker_group
             .warmup(max_batch_size, max_seq_len, max_num_batched_tokens)
             .await
             .unwrap_or_else(|e| panic!("Failed to warmup worker: {e}"));
@@ -62,11 +65,15 @@ impl LLMEngine {
             cache_size as f64 / (1 << 30) as f64
         );
 
-        let num_blocks = worker_group
+        let num_blocks = model_worker_group
             .init_cache(cache_size)
             .await
             .unwrap_or_else(|e| panic!("Failed to init KV cache: {e}"));
         info!("Created {num_blocks} KV cache blocks.");
+
+        let kv_worker_group = KVWorkerGroup::init(tp_size)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to initialize KV worker group: {e}"));
 
         let scheduler = Scheduler::new(
             max_batch_size,
@@ -84,7 +91,8 @@ impl LLMEngine {
             max_seq_len,
             max_num_batched_tokens,
             tp_size,
-            worker_group,
+            model_worker_group,
+            kv_worker_group,
             scheduler: Arc::new(Mutex::new(scheduler)),
             last_log_time: 0,
         })
@@ -119,16 +127,22 @@ impl LLMEngine {
     }
 
     pub async fn iter(&self) -> Option<Vec<InferTask>> {
-        let infer_inputs = { self.scheduler.lock().await.schedule() };
+        let (infer_inputs, block_mappings) = { self.scheduler.lock().await.schedule() };
         if infer_inputs.len() == 0 {
             return None;
         }
 
-        let infer_outputs = self
-            .worker_group
-            .infer(infer_inputs)
-            .await
-            .unwrap_or_else(|e| panic!("Failed to execute worker: {e}"));
+        let record_after_execute = block_mappings.len() > 0;
+
+        let (infer_result, transfer_result) = join!(
+            self.model_worker_group
+                .infer(infer_inputs, false, record_after_execute),
+            self.kv_worker_group.transfer_kv(block_mappings),
+        );
+
+        let infer_outputs =
+            infer_result.unwrap_or_else(|e| panic!("Failed to execute worker: {e}"));
+        let _ = transfer_result.unwrap_or_else(|e| panic!("Failed to transfer KV: {e}"));
 
         let finished_tasks = { self.scheduler.lock().await.update(infer_outputs) };
 

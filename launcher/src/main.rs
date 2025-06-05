@@ -95,7 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut workers: Vec<Child> = Vec::new();
     for (group_id, llm_server) in config.llm_servers.iter().enumerate() {
         for rank in 0..llm_server.tp_size {
-            let uds_path = format!("{}-{}/{}", WORKER_GROUP_UDS_PATH_PREFIX, group_id, rank);
+            let uds_path = format!(
+                "{}-{}/model-{}",
+                WORKER_GROUP_UDS_PATH_PREFIX, group_id, rank
+            );
 
             std::fs::create_dir_all(Path::new(&uds_path).parent().unwrap())?;
             if Path::new(&uds_path).exists() {

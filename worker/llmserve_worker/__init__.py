@@ -1,1 +1,2 @@
 from llmserve_worker.model_worker import ModelWorker
+from llmserve_worker.kv_worker import KVWorker

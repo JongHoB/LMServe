@@ -43,7 +43,7 @@ class ModelConfig:
 def get_model(
     model_config: ModelConfig,
     max_input_tokens: Optional[int] = None,
-):
+) -> torch.nn.Module:
     model_type = model_config.model_type.lower()
     dtype = model_config.dtype
 

@@ -8,6 +8,10 @@ service Worker {
   rpc InitCache(InitCacheRequest) returns (InitCacheResponse);
 }
 
+service KVWorker {
+  rpc TransferKV(KVTransferRequest) returns (KVTransferResponse);
+}
+
 message WarmupRequest {
   uint64 max_batch_size = 1;
   uint64 max_seq_len = 2;
@@ -31,6 +35,8 @@ message InferInput {
 message InferRequest {
   repeated InferInput inputs = 1;
   bool use_cache = 2;
+  bool wait_before_execute = 3;
+  bool record_after_execute = 4;
 }
 
 message InferOutput {
@@ -45,3 +51,17 @@ message InferResponse { map<uint64, InferOutput> outputs = 1; }
 message InitCacheRequest { uint64 cache_size = 2; }
 
 message InitCacheResponse { uint64 num_blocks = 1; }
+
+message BlockMapping {
+  uint64 seq_id = 1;
+  uint64 block_offset = 2;
+  repeated uint32 block_ids = 3;
+}
+
+message KVTransferRequest {
+  repeated BlockMapping block_mappings = 1;
+}
+
+message KVTransferResponse {
+  bool success = 1;
+}

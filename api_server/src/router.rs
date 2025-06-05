@@ -97,9 +97,12 @@ impl EngineRouter {
 
     // FIXME(jinu)
     pub async fn generate(&self, request: GenerateRequest) -> Result<GenerateResponse> {
-        let mut client = self.get_client(EngineKind::FULL).await?;
-
-        let response = client.generate(request).await?.into_inner();
+        let response;
+        if let Ok(mut client) = self.get_client(EngineKind::FULL).await {
+            response = client.generate(request).await?.into_inner();
+        } else {
+            response = self.generate_dist(request).await?;
+        }
 
         Ok(response)
     }

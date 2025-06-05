@@ -1,15 +1,20 @@
 import torch
 import flashinfer
 import numpy as np
+import pycuda.driver as cuda
+import torch.multiprocessing as mp
 
 from typing import List, Tuple, Dict, Optional, Any
 from transformers import AutoTokenizer
 
 from llmserve_worker.models import get_model, ModelConfig
+from llmserve_worker.models.utils import travel_layers
 from llmserve_worker.models.input_params import InputParams
 from llmserve_worker.models.sampler import sample
 from llmserve_worker.ops.cache_ops import copy_blocks
 from llmserve_worker.pb.worker_pb2 import InferInput, InferOutput
+from llmserve_worker.dist_utils import init_distributed
+from llmserve_worker.kv_worker import KVWorkerHandle, KVWorkerParams
 
 
 def build_prefill_wrapper(
@@ -135,6 +140,8 @@ class ModelWorker:
         block_size: int,
         tokenizer=None,
     ):
+        init_distributed()
+
         self.model_config = ModelConfig(model_name)
         self.model = get_model(self.model_config)
 
@@ -147,13 +154,22 @@ class ModelWorker:
         self.eos_token_ids_tensor = torch.tensor(eos_token_ids, device='cuda')
 
         self.block_size = block_size
-        # The kv_caches are initialized at init_cache()
-        self.kv_caches = None
+        # The kv_caches & events are initialized at init_cache()
+        self.kv_caches: torch.Tensor = None
+        self.kv_worker_handle: KVWorkerHandle = None
+
+        self.enable_wait_before_execute: bool = False
+        self.enable_record_after_execute: bool = False
 
         # Sampling parameters
         self.top_k: int = 1
         self.top_p: float = 0.0
         self.temperature: float = 0.0
+
+        self.ctx = cuda.Context.attach()
+
+    def get_config(self) -> ModelConfig:
+        self.model_config.clone()
 
     def update_sampling_params(
         self,
@@ -167,7 +183,7 @@ class ModelWorker:
 
     def init_cache(self,
                    cache_size: int = None,
-                   num_blocks: int = None) -> int:
+                   num_blocks: int = None) -> Tuple[int, KVWorkerParams]:
         if cache_size is None and num_blocks is None:
             raise ValueError(
                 "At least one of 'cache_size' or 'num_blocks' must be given.")
@@ -184,9 +200,8 @@ class ModelWorker:
         kv_block_size = (block_size * num_kv_heads * head_dim * dtype_byte)
 
         if cache_size is not None:
-            num_available_blocks = (
-                int(cache_size) //
-                (num_layers * 2 * kv_block_size))
+            num_available_blocks = (int(cache_size) //
+                                    (num_layers * 2 * kv_block_size))
             if num_blocks is not None:
                 num_blocks = min(num_blocks, num_available_blocks)
             else:
@@ -201,7 +216,70 @@ class ModelWorker:
                                      dtype=dtype,
                                      device='cuda')
 
-        return num_blocks
+        # TODO(jinu): Make KVCacheConfig
+        # Init KVWorkerHandle
+        pre_events = [
+            cuda.Event(flags=(cuda.event_flags.DISABLE_TIMING
+                              | cuda.event_flags.INTERPROCESS))
+            for _ in range(num_layers)
+        ]
+        post_events = [
+            cuda.Event(flags=(cuda.event_flags.DISABLE_TIMING
+                              | cuda.event_flags.INTERPROCESS))
+            for _ in range(num_layers)
+        ]
+
+        model_queue = mp.Queue()
+        kv_queue = mp.Queue()
+
+        self.kv_worker_handle = KVWorkerHandle(
+            pre_events,
+            post_events,
+            model_queue,
+            kv_queue,
+        )
+
+        # Register hook to synchronize with KVWorker
+        attn_layers = travel_layers(self.model, includes=["Attention"])
+        for i, layer in enumerate(attn_layers):
+            def make_hook(i):
+                def pre_hook_fn(mod, input):
+                    if self.enable_wait_before_execute:
+                        self.kv_worker_handle.model_queue.get()
+                        self.kv_worker_handle.pre_events[i].record()
+
+                def post_hook_fn(mod, input, output):
+                    if self.enable_record_after_execute:
+                        self.kv_worker_handle.post_events[i].record()
+                        # Put a dummy value to trigger KV transfer
+                        self.kv_worker_handle.kv_queue.put(b'')
+                return pre_hook_fn, post_hook_fn
+
+            pre_hook, post_hook = make_hook(i)
+            layer.register_forward_pre_hook(pre_hook)
+            layer.register_forward_hook(post_hook)
+
+        # Generate KVWorkerParams
+        kv_cache_metadata = self.kv_caches.untyped_storage()._share_cuda_()
+        pre_event_handles = [
+            e.ipc_handle() for e in self.kv_worker_handle.pre_events
+        ]
+        post_event_handles = [
+            e.ipc_handle() for e in self.kv_worker_handle.post_events
+        ]
+
+        kv_worker_params = KVWorkerParams(
+            kv_cache_metadata,
+            num_layers,
+            num_blocks,
+            dtype,
+            pre_event_handles,
+            post_event_handles,
+            model_queue,
+            kv_queue,
+        )
+
+        return num_blocks, kv_worker_params
 
     def _make_inputs(
             self, inputs: List[InferInput], use_cache=True,
@@ -398,12 +476,17 @@ class ModelWorker:
         self,
         inputs: List[InferInput],
         use_cache: bool,
+        wait_before_execute: bool,
+        record_after_execute: bool,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
     ) -> Dict[int, Dict[str, Any]]:
         input_ids, input_params = self._make_inputs(inputs, use_cache)
 
         if blocks_to_copy is not None and len(blocks_to_copy) > 0:
             copy_blocks(self.kv_caches, blocks_to_copy)
+
+        self.enable_wait_before_execute = wait_before_execute
+        self.enable_record_after_execute = record_after_execute
 
         logits = self.model(input_ids=input_ids,
                             kv_caches=self.kv_caches if use_cache else None,
@@ -466,3 +549,6 @@ class ModelWorker:
                 return mod_size
 
         return get_total_size(self.model)
+
+    def __del__(self):
+        self.ctx.pop()

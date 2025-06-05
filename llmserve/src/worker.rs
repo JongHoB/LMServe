@@ -9,11 +9,155 @@ use tonic::transport::Channel;
 use tracing::{debug, info};
 
 use crate::infer_task::{InferInput, InferOutput};
+use crate::pb::worker::kv_worker_client::KvWorkerClient;
 use crate::pb::worker::worker_client::WorkerClient;
-use crate::pb::worker::{InferRequest, InitCacheRequest, WarmupRequest};
+use crate::pb::worker::{
+    BlockMapping, InferRequest, InitCacheRequest, KvTransferRequest, WarmupRequest,
+};
 
 type StdError = Box<dyn std::error::Error + Send + Sync + 'static>;
 type Result<T, E = StdError> = std::result::Result<T, E>;
+
+#[tonic::async_trait]
+pub trait GrpcClient: Send + Sync + Sized + 'static {
+    async fn connect(address: String) -> Result<Self, tonic::transport::Error>;
+}
+
+#[tonic::async_trait]
+impl GrpcClient for WorkerClient<Channel> {
+    async fn connect(address: String) -> Result<Self, tonic::transport::Error> {
+        WorkerClient::connect(address).await
+    }
+}
+
+#[tonic::async_trait]
+impl GrpcClient for KvWorkerClient<Channel> {
+    async fn connect(address: String) -> Result<Self, tonic::transport::Error> {
+        KvWorkerClient::connect(address).await
+    }
+}
+
+#[tonic::async_trait]
+trait Worker: Send + Sync + Sized + 'static {
+    type Client: GrpcClient;
+
+    async fn connect(address: String) -> Result<Self>;
+}
+
+pub struct WorkerImpl<T: GrpcClient> {
+    client: Arc<Mutex<T>>,
+}
+
+#[tonic::async_trait]
+impl<T: GrpcClient> Worker for WorkerImpl<T> {
+    type Client = T;
+    async fn connect(address: String) -> Result<Self> {
+        // TODO(jinu): Add timeout
+        let client = loop {
+            match T::connect(address.clone()).await {
+                Ok(client) => {
+                    info!("Successfully connected to {address}");
+                    break client;
+                }
+                Err(error) => {
+                    debug!("Trying to connect to worker ({}): {:?}", address, error);
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }
+        };
+
+        Ok(Self {
+            client: Arc::new(Mutex::new(client)),
+        })
+    }
+}
+
+type ModelWorker = WorkerImpl<WorkerClient<Channel>>;
+type KVWorker = WorkerImpl<KvWorkerClient<Channel>>;
+
+impl ModelWorker {
+    async fn warmup(&self, request: WarmupRequest) -> Result<(u64, u64)> {
+        let response = self.client.lock().await.warmup(request).await?;
+        let response = response.into_inner();
+        Ok((response.gpu_total_mem_size, response.gpu_peak_mem_size))
+    }
+
+    async fn infer(&self, request: InferRequest) -> Result<HashMap<u64, InferOutput>> {
+        let response = self.client.lock().await.infer(request).await?;
+        let outputs = response.into_inner().outputs;
+        Ok(outputs)
+    }
+
+    async fn init_cache(&self, request: InitCacheRequest) -> Result<u64> {
+        let response = self.client.lock().await.init_cache(request).await?;
+        let num_blocks = response.into_inner().num_blocks;
+        Ok(num_blocks)
+    }
+}
+
+impl KVWorker {
+    async fn transfer_kv(&self, request: KvTransferRequest) -> Result<()> {
+        let _ = self.client.lock().await.transfer_kv(request).await?;
+        Ok(())
+    }
+}
+
+#[tonic::async_trait]
+trait WorkerGroup: Send + Sync + Sized + 'static {
+    type Worker: Worker;
+
+    async fn run_workers_gather<V, P, E, Fut, F>(&self, params: P, task_fn: F) -> Result<Vec<V>, E>
+    where
+        V: PartialEq + Send + 'static,
+        P: Send + Sync + Clone + 'static,
+        E: Send + 'static,
+        Fut: std::future::Future<Output = Result<V, E>> + Send + 'static,
+        F: Fn(Arc<Self::Worker>, P) -> Fut + Copy + Send + Sync + 'static;
+}
+
+pub struct WorkerGroupImpl<T> {
+    workers: Vec<Arc<T>>,
+}
+
+#[tonic::async_trait]
+impl<T: Worker> WorkerGroup for WorkerGroupImpl<T> {
+    type Worker = T;
+
+    async fn run_workers_gather<V, P, E, Fut, F>(&self, params: P, task_fn: F) -> Result<Vec<V>, E>
+    where
+        V: PartialEq + Send + 'static,
+        P: Send + Sync + Clone + 'static,
+        E: Send + 'static,
+        Fut: std::future::Future<Output = Result<V, E>> + Send + 'static,
+        F: Fn(Arc<T>, P) -> Fut + Copy + Send + Sync + 'static,
+    {
+        let mut handles = Vec::with_capacity(self.workers.len());
+
+        for worker in self.workers.iter() {
+            let w = Arc::clone(worker);
+            let p = params.clone();
+
+            let handle = tokio::spawn(async move { task_fn(w, p).await });
+
+            handles.push(handle);
+        }
+
+        let results = join_all(handles).await;
+
+        let mut outputs = Vec::with_capacity(results.len());
+        for res in results {
+            match res {
+                Ok(Ok(val)) => outputs.push(val),
+                Ok(Err(_)) => panic!("Failed to run worker"),
+                Err(join_err) => {
+                    panic!("tokio::spawn task panicked: {:?}", join_err);
+                }
+            }
+        }
+
+        Ok(outputs)
+    }
+}
 
 fn extract_if_all_equal<T>(items: &[T]) -> Result<T, &'static str>
 where
@@ -30,70 +174,23 @@ where
     }
 }
 
-pub struct Worker {
-    client: Arc<Mutex<WorkerClient<Channel>>>,
-}
+pub type ModelWorkerGroup = WorkerGroupImpl<ModelWorker>;
+pub type KVWorkerGroup = WorkerGroupImpl<KVWorker>;
 
-impl Worker {
-    pub async fn connect(address: String) -> Result<Worker> {
-        // TODO(jinu): Add timeout.
-        let client = loop {
-            match WorkerClient::connect(address.clone()).await {
-                Ok(client) => {
-                    info!("Successfully connected to the worker.");
-                    break client;
-                }
-                Err(error) => {
-                    debug!("Trying to connect to worker ({}): {:?}", address, error);
-                }
-            };
-
-            sleep(Duration::from_millis(500)).await;
-        };
-
-        Ok(Worker {
-            client: Arc::new(Mutex::new(client)),
-        })
-    }
-
-    pub async fn warmup(&self, request: WarmupRequest) -> Result<(u64, u64)> {
-        let response = self.client.lock().await.warmup(request).await?;
-        let response = response.into_inner();
-        Ok((response.gpu_total_mem_size, response.gpu_peak_mem_size))
-    }
-
-    pub async fn infer(&self, request: InferRequest) -> Result<HashMap<u64, InferOutput>> {
-        let response = self.client.lock().await.infer(request).await?;
-        let outputs = response.into_inner().outputs;
-        Ok(outputs)
-    }
-
-    pub async fn init_cache(&self, request: InitCacheRequest) -> Result<u64> {
-        let response = self.client.lock().await.init_cache(request).await?;
-        let num_blocks = response.into_inner().num_blocks;
-        Ok(num_blocks)
-    }
-}
-
-#[allow(dead_code)]
-pub struct WorkerGroup {
-    workers: Vec<Arc<Worker>>,
-}
-
-impl WorkerGroup {
-    pub async fn init(num_workers: u8) -> Result<WorkerGroup> {
+impl ModelWorkerGroup {
+    pub async fn init(num_workers: u8) -> Result<Self> {
         let mut workers: Vec<_> = Vec::with_capacity(num_workers as usize);
         let worker_group_uds_path =
             env::var("WORKER_GROUP_UDS_PATH").expect("WORKER_GROUP_UDS_PATH env is not set");
         for rank in 0..num_workers {
-            let address = format!("unix://{}/{}", worker_group_uds_path, rank);
-            let worker = Worker::connect(address.parse().unwrap())
+            let address = format!("unix://{}/model-{}", worker_group_uds_path, rank);
+            let worker = ModelWorker::connect(address.parse().unwrap())
                 .await
                 .unwrap_or_else(|e| panic!("Failed to connect worker: {e}"));
             workers.push(Arc::new(worker));
         }
 
-        Ok(WorkerGroup { workers })
+        Ok(Self { workers })
     }
 
     pub async fn warmup(
@@ -136,10 +233,17 @@ impl WorkerGroup {
         Ok(num_blocks)
     }
 
-    pub async fn infer(&self, inputs: Vec<InferInput>) -> Result<HashMap<u64, InferOutput>> {
+    pub async fn infer(
+        &self,
+        inputs: Vec<InferInput>,
+        wait_before_execute: bool,
+        record_after_execute: bool,
+    ) -> Result<HashMap<u64, InferOutput>> {
         let request = InferRequest {
             inputs,
             use_cache: true,
+            wait_before_execute,
+            record_after_execute,
         };
         let outputs = self
             .run_workers_gather(request, move |worker, request| async move {
@@ -152,39 +256,33 @@ impl WorkerGroup {
 
         Ok(infer_outputs)
     }
+}
 
-    async fn run_workers_gather<T, P, E, Fut, F>(&self, params: P, task_fn: F) -> Result<Vec<T>, E>
-    where
-        T: PartialEq + Send + 'static,
-        P: Send + Sync + Clone + 'static,
-        E: Send + 'static,
-        Fut: std::future::Future<Output = Result<T, E>> + Send + 'static,
-        F: Fn(Arc<Worker>, P) -> Fut + Copy + Send + Sync + 'static,
-    {
-        let mut handles = Vec::with_capacity(self.workers.len());
-
-        for worker in self.workers.iter() {
-            let w = Arc::clone(worker);
-            let p = params.clone();
-
-            let handle = tokio::spawn(async move { task_fn(w, p).await });
-
-            handles.push(handle);
+impl KVWorkerGroup {
+    pub async fn init(num_workers: u8) -> Result<Self> {
+        let mut workers: Vec<_> = Vec::with_capacity(num_workers as usize);
+        let worker_group_uds_path =
+            env::var("WORKER_GROUP_UDS_PATH").expect("WORKER_GROUP_UDS_PATH env is not set");
+        for rank in 0..num_workers {
+            let address = format!("unix://{}/model-{}-kv", worker_group_uds_path, rank);
+            let worker = KVWorker::connect(address.parse().unwrap())
+                .await
+                .unwrap_or_else(|e| panic!("Failed to connect worker: {e}"));
+            workers.push(Arc::new(worker));
         }
 
-        let results = join_all(handles).await;
+        Ok(Self { workers })
+    }
 
-        let mut outputs = Vec::with_capacity(results.len());
-        for res in results {
-            match res {
-                Ok(Ok(val)) => outputs.push(val),
-                Ok(Err(_)) => panic!("Failed to run worker"),
-                Err(join_err) => {
-                    panic!("tokio::spawn task panicked: {:?}", join_err);
-                }
-            }
-        }
+    pub async fn transfer_kv(&self, block_mappings: Vec<BlockMapping>) -> Result<()> {
+        let request = KvTransferRequest { block_mappings };
 
-        Ok(outputs)
+        let _ = self
+            .run_workers_gather(request, move |worker, request| async move {
+                worker.transfer_kv(request).await
+            })
+            .await?;
+
+        Ok(())
     }
 }

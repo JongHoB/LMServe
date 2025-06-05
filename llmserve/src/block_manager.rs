@@ -165,7 +165,7 @@ impl BlockMap {
 }
 
 pub struct BlockManager {
-    block_size: usize,
+    pub block_size: usize,
     block_mapping_table: HashMap<u64, BlockMap>,
     block_allocator: BlockAllocator,
 }
@@ -185,6 +185,24 @@ impl BlockManager {
         self.block_mapping_table
             .get(&seq.seq_id)
             .map_or(Vec::new(), |block_map| block_map.block_ids.clone())
+    }
+
+    pub fn get_block_ids_range(&self, seq_id: u64, start: usize, end: usize) -> (usize, Vec<u32>) {
+        let block_offset = start / self.block_size;
+        let mut block_end = end / self.block_size + 1;
+
+        if let Some(block_map) = self.block_mapping_table.get(&seq_id) {
+            let block_ids = &block_map.block_ids;
+            if block_offset >= block_end || block_offset >= block_ids.len() {
+                return (0, Vec::new());
+            }
+
+            block_end = block_end.min(block_ids.len());
+
+            (block_offset, (&block_ids[block_offset..block_end]).to_vec())
+        } else {
+            (0, Vec::new())
+        }
     }
 
     pub fn get_filled_token_len(&self, seq_id: u64) -> usize {

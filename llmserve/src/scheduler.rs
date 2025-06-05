@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::block_manager::BlockManager;
 use crate::infer_task::{InferInput, InferOutput, InferTask};
+use crate::pb::worker::BlockMapping;
 use crate::sequence::{SeqStatus, Sequence};
 
 pub struct Scheduler {
@@ -129,7 +130,28 @@ impl Scheduler {
         infer_inputs
     }
 
-    pub fn schedule(&mut self) -> Vec<InferInput> {
+    fn generate_block_mappings(&self, infer_inputs: &Vec<InferInput>) -> Vec<BlockMapping> {
+        let mut block_mappings: Vec<_> = Vec::with_capacity(infer_inputs.len());
+        for infer_input in infer_inputs.iter() {
+            let start = infer_input.filled_token_len;
+            let end = start + infer_input.input_len;
+            let (block_offset, block_ids) = self.block_manager.get_block_ids_range(
+                infer_input.seq_id,
+                start as usize,
+                end as usize,
+            );
+
+            block_mappings.push(BlockMapping {
+                seq_id: infer_input.seq_id,
+                block_offset: block_offset as u64,
+                block_ids: block_ids.to_vec(),
+            })
+        }
+
+        block_mappings
+    }
+
+    pub fn schedule(&mut self) -> (Vec<InferInput>, Vec<BlockMapping>) {
         let mut allocated: VecDeque<InferTask> = VecDeque::new();
 
         while let Some(mut infer_task) = self.allocated.pop_front() {
@@ -160,6 +182,7 @@ impl Scheduler {
 
         self.allocated = allocated;
         let infer_inputs = self.generate_infer_inputs();
+        let block_mappings = self.generate_block_mappings(&infer_inputs);
 
         {
             // Logging
@@ -175,7 +198,7 @@ impl Scheduler {
             }
         }
 
-        infer_inputs
+        (infer_inputs, block_mappings)
     }
 
     pub fn update(&mut self, infer_outputs: HashMap<u64, InferOutput>) -> Vec<InferTask> {
