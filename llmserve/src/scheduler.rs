@@ -5,11 +5,11 @@ use tracing::info;
 
 use crate::block_manager::BlockManager;
 use crate::infer_task::{InferInput, InferOutput, InferTask};
-use crate::pb::worker::BlockMapping;
-use crate::sequence::{SeqStatus, Sequence};
+use crate::pb::worker::{BlockMapping, BlockMappingEntry};
+use crate::sequence::SeqStatus;
 
 struct BatchEntry {
-    pub input_len: usize,
+    pub context_len: usize,
     pub chunked: bool,
 }
 
@@ -17,7 +17,8 @@ pub struct Scheduler {
     pub max_batch_size: usize,
     pub max_seq_len: usize,
     pub max_num_batched_tokens: usize,
-    block_manager: BlockManager,
+    gpu_block_manager: BlockManager,
+    pub host_block_manager: BlockManager,
     watermark_blocks: f32,
     waiting: VecDeque<InferTask>,
     allocated: VecDeque<InferTask>,
@@ -33,13 +34,15 @@ impl Scheduler {
         max_seq_len: usize,
         max_num_batched_tokens: usize,
         block_size: usize,
-        num_blocks: usize,
+        num_gpu_blocks: usize,
+        num_host_blocks: usize,
     ) -> Scheduler {
         Scheduler {
             max_batch_size,
             max_seq_len,
             max_num_batched_tokens,
-            block_manager: BlockManager::new(block_size, num_blocks),
+            gpu_block_manager: BlockManager::new(block_size, num_gpu_blocks),
+            host_block_manager: BlockManager::new(block_size, num_host_blocks),
             watermark_blocks: 0.97,
             waiting: VecDeque::new(),
             allocated: VecDeque::new(),
@@ -49,37 +52,36 @@ impl Scheduler {
     }
 
     pub fn add(&mut self, infer_task: InferTask) {
+        for seq in infer_task.get_active_seqs() {
+            self.host_block_manager.init_prefix_cache_blocks(seq);
+        }
+
         self.waiting.push_back(infer_task);
     }
 
-    fn can_alloc_seq(&self, seq: &Sequence, watermark: f32) -> bool {
-        let num_blocks = self.block_manager.get_num_required_blocks(seq);
-        self.block_manager.can_alloc_blocks(num_blocks, watermark)
-    }
-
     fn try_reserve_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
-        let mut seqs = infer_task.get_active_seqs_mut();
-        let mut seq_iter = seqs.iter_mut();
+        let seqs = infer_task.get_active_seqs_mut();
 
-        let Some(head_seq) = seq_iter.next() else {
-            return false;
-        };
+        let head_seq = seqs.first().expect("No active sequence found");
 
-        if !self.can_alloc_seq(head_seq, watermark) {
+        let num_cache_blocks = self
+            .gpu_block_manager
+            .get_num_prefix_cache_blocks(&head_seq.token_ids);
+        let num_required_blocks = self.gpu_block_manager.get_num_required_blocks(head_seq)
+            - num_cache_blocks
+            + seqs.len();
+
+        if !self
+            .gpu_block_manager
+            .can_alloc_blocks(num_required_blocks, watermark)
+        {
             return false;
         }
 
-        self.block_manager.reserve_blocks(head_seq);
-        head_seq.status = SeqStatus::ALLOCATED;
-
-        for seq in seq_iter {
-            self.block_manager
-                .share_blocks(head_seq, seq)
-                .unwrap_or_else(|e| panic!("Failed to share KV block: {e}"));
-            if self.can_alloc_seq(seq, watermark) {
-                self.block_manager.reserve_blocks(seq);
-                seq.status = SeqStatus::ALLOCATED;
-            }
+        for seq in seqs {
+            self.gpu_block_manager.init_prefix_cache_blocks(seq);
+            self.gpu_block_manager.reserve_blocks(seq);
+            seq.status = SeqStatus::ALLOCATED;
         }
 
         true
@@ -89,22 +91,62 @@ impl Scheduler {
         let mut num_alloc_seqs = 0;
         let seqs = infer_task.get_active_seqs_mut();
         for seq in seqs {
-            if self.can_alloc_seq(seq, watermark) {
-                self.block_manager.reserve_blocks(seq);
+            if self.gpu_block_manager.can_alloc_seq(seq, watermark) {
+                self.gpu_block_manager.reserve_blocks(seq);
                 seq.status = SeqStatus::ALLOCATED;
                 num_alloc_seqs += 1;
+            } else {
+                break;
             }
         }
 
         num_alloc_seqs > 0
     }
 
+    pub fn try_reserve_host_infer_task(&mut self, infer_task: &InferTask) -> bool {
+        let seqs = infer_task.get_active_seqs();
+
+        let head_seq = seqs.first().expect("No active sequence found");
+        let num_required_blocks =
+            self.host_block_manager.get_num_required_blocks(head_seq) + seqs.len();
+        if !self
+            .host_block_manager
+            .can_alloc_blocks(num_required_blocks, 1.0)
+        {
+            return false;
+        }
+
+        for seq in seqs {
+            self.host_block_manager.reserve_blocks(seq);
+        }
+
+        true
+    }
+
+    pub fn try_extend_host_infer_task(&mut self, infer_task: &InferTask) -> bool {
+        let mut num_alloc_seqs = 0;
+        let seqs = infer_task.get_active_seqs();
+        for seq in seqs {
+            if self.host_block_manager.can_alloc_seq(seq, 1.0) {
+                self.host_block_manager.reserve_blocks(seq);
+                num_alloc_seqs += 1;
+            } else {
+                break;
+            }
+        }
+
+        num_alloc_seqs > 0
+    }
+
+    pub fn reserve_tokens(&mut self, token_ids: &Vec<u32>, start: usize, end: usize) -> Vec<u32> {
+        self.host_block_manager
+            .reserve_tokens(token_ids, start, end)
+    }
+
     fn preempt_infer_task(&mut self, infer_task: &mut InferTask) {
         let seqs = infer_task.get_active_seqs_mut();
         for seq in seqs {
-            self.block_manager
-                .free(seq)
-                .unwrap_or_else(|e| panic!("Failed to preempt sequence: {e}"));
+            self.gpu_block_manager.free(seq.seq_id);
             seq.status = SeqStatus::WAITING;
         }
     }
@@ -131,52 +173,103 @@ impl Scheduler {
                 }
 
                 let total = seq.token_ids.len();
-                let mut filled = match seq.cached {
-                    true => {
-                        let cached_len = seq.token_ids.len() - 1;
-                        self.block_manager.update_filled_len(seq.seq_id, cached_len);
-                        cached_len
+                let mut filled = self.gpu_block_manager.get_filled_token_len(seq.seq_id);
+                {
+                    let gpu_filled = self.gpu_block_manager.get_filled_token_len(seq.seq_id);
+                    let host_filled = self.host_block_manager.get_filled_token_len(seq.seq_id);
+
+                    if host_filled > gpu_filled {
+                        let (gpu_block_ids, _) = self.gpu_block_manager.get_block_ids_range(
+                            seq.seq_id,
+                            gpu_filled,
+                            host_filled,
+                        );
+                        let (host_block_ids, _) = self.host_block_manager.get_block_ids_range(
+                            seq.seq_id,
+                            gpu_filled,
+                            host_filled,
+                        );
+
+                        let mut block_entries: Vec<_> =
+                            Vec::with_capacity(host_block_ids.len().min(gpu_block_ids.len()));
+                        for (host_blk_id, gpu_blk_id) in
+                            host_block_ids.into_iter().zip(gpu_block_ids)
+                        {
+                            block_entries.push(BlockMappingEntry {
+                                src_block_id: host_blk_id,
+                                dst_block_id: gpu_blk_id,
+                            });
+                        }
+
+                        fetch_block_mappings.push(BlockMapping {
+                            entries: block_entries,
+                        });
+
+                        self.gpu_block_manager
+                            .update_filled_len(seq.seq_id, host_filled);
                     }
-                    false => self.block_manager.get_filled_token_len(seq.seq_id),
-                };
+                }
+
                 // Although all tokens are filled, we use last token to generate an output token.
                 filled = min(filled, total - 1);
                 let input_len = min(total - filled, token_budget);
 
                 if input_len > 0 {
                     let input_ids = seq.token_ids[filled..filled + input_len].to_vec();
-                    let (_, block_ids) =
-                        self.block_manager
-                            .get_block_ids_range(seq.seq_id, 0, filled + input_len);
+                    let (block_ids, _) = self.gpu_block_manager.get_block_ids_range(
+                        seq.seq_id,
+                        0,
+                        filled + input_len,
+                    );
 
                     let chunked = total > (filled + input_len);
 
+                    let input_len = input_ids.len();
+                    let context_len = input_len + filled;
+
+                    let infer_input =
+                        InferInput::new(seq.seq_id, input_ids, filled, context_len, block_ids);
+
                     let entry = BatchEntry {
-                        input_len: input_ids.len(),
+                        context_len,
                         chunked,
                     };
 
-                    infer_inputs.push(InferInput::new(
-                        seq.seq_id,
-                        input_ids,
-                        filled,
-                        block_ids.clone(),
-                    ));
-
-                    let block_mapping = BlockMapping {
-                        seq_id: seq.seq_id,
-                        block_ids,
-                    };
-
-                    if seq.cached {
-                        fetch_block_mappings.push(block_mapping.clone());
-                    }
-                    write_back_block_mappings.push(block_mapping);
+                    infer_inputs.push(infer_input);
 
                     num_seqs += 1;
                     token_budget -= input_len;
 
                     running_batch.insert(seq.seq_id, entry);
+
+                    {
+                        let host_filled = self.host_block_manager.get_filled_token_len(seq.seq_id);
+
+                        let (gpu_block_ids, _) = self.gpu_block_manager.get_block_ids_range(
+                            seq.seq_id,
+                            host_filled,
+                            context_len,
+                        );
+                        let (host_block_ids, _) = self.host_block_manager.get_block_ids_range(
+                            seq.seq_id,
+                            host_filled,
+                            context_len,
+                        );
+
+                        let mut block_entries: Vec<_> = Vec::with_capacity(gpu_block_ids.len());
+                        for (gpu_blk_id, host_blk_id) in
+                            gpu_block_ids.into_iter().zip(host_block_ids)
+                        {
+                            block_entries.push(BlockMappingEntry {
+                                src_block_id: gpu_blk_id,
+                                dst_block_id: host_blk_id,
+                            });
+                        }
+
+                        write_back_block_mappings.push(BlockMapping {
+                            entries: block_entries,
+                        });
+                    }
                 }
             }
         }
@@ -194,6 +287,11 @@ impl Scheduler {
 
         while let Some(mut infer_task) = self.allocated.pop_front() {
             if self.try_extend_infer_task(&mut infer_task, 1.0) {
+                for seq in infer_task.get_active_seqs_mut() {
+                    seq.status = SeqStatus::ALLOCATED;
+                }
+                self.try_extend_host_infer_task(&infer_task);
+
                 allocated.push_back(infer_task);
             } else {
                 if let Some(mut preempt_task) = self.allocated.pop_back() {
@@ -211,6 +309,11 @@ impl Scheduler {
 
         while let Some(mut infer_task) = self.waiting.pop_front() {
             if self.try_reserve_infer_task(&mut infer_task, self.watermark_blocks) {
+                for seq in infer_task.get_active_seqs_mut() {
+                    seq.status = SeqStatus::ALLOCATED;
+                }
+                self.try_reserve_host_infer_task(&infer_task);
+
                 allocated.push_back(infer_task);
             } else {
                 self.waiting.push_front(infer_task);
@@ -261,8 +364,10 @@ impl Scheduler {
                     _ => continue,
                 };
 
-                self.block_manager
-                    .update_filled_len(seq.seq_id, entry.input_len as usize);
+                self.gpu_block_manager
+                    .update_filled_len(seq.seq_id, entry.context_len);
+                self.host_block_manager
+                    .update_filled_len(seq.seq_id, entry.context_len);
 
                 if entry.chunked {
                     continue;
@@ -302,21 +407,32 @@ impl Scheduler {
         finished_tasks
     }
 
+    pub fn get_host_cache_block_range(
+        &self,
+        token_ids: Vec<u32>,
+        start: usize,
+        end: usize,
+    ) -> (Vec<u32>, usize) {
+        self.host_block_manager
+            .get_prefix_cache_blocks_range(&token_ids, start, end)
+    }
+
+    pub fn get_host_cache_token_len(&self, token_ids: &Vec<u32>) -> usize {
+        self.host_block_manager
+            .get_prefix_cache_token_len(token_ids)
+    }
+
     fn remove_task(&mut self, infer_task: &InferTask) {
         for seq in infer_task.get_seqs(SeqStatus::FINISHED) {
-            self.block_manager.free(seq).unwrap_or_else(|e| {
-                panic!(
-                    "Failed to free KV blocks for sequence {}: {}",
-                    seq.seq_id, e
-                )
-            });
+            self.gpu_block_manager.free(seq.seq_id);
+            self.host_block_manager.free(seq.seq_id);
         }
     }
 
     fn get_log_text(&self) -> String {
         let num_allocated_reqs: usize = self.allocated.len();
         let num_waiting_reqs: usize = self.waiting.len();
-        let kv_block_usage: f32 = self.block_manager.get_block_usage();
+        let kv_block_usage: f32 = self.gpu_block_manager.get_block_usage();
 
         format!(
             "Allocated: {} reqs, Waiting: {} reqs, KV cache usage: {:.2} %",

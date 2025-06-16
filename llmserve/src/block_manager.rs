@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -240,21 +239,24 @@ impl BlockManager {
             .map_or(Vec::new(), |block_map| block_map.block_ids.clone())
     }
 
-    pub fn get_block_ids_range(&self, seq_id: u64, start: usize, end: usize) -> (usize, Vec<u32>) {
+    pub fn get_block_ids_range(&self, seq_id: u64, start: usize, end: usize) -> (Vec<u32>, usize) {
         let block_offset = start / self.block_size;
         let mut block_end = end / self.block_size + 1;
 
         if let Some(block_map) = self.seq_block_mapping_table.get(&seq_id) {
             let block_ids = &block_map.block_ids;
             if block_offset >= block_end || block_offset >= block_ids.len() {
-                return (0, Vec::new());
+                return (Vec::new(), block_map.filled_token_len);
             }
 
             block_end = block_end.min(block_ids.len());
 
-            (block_offset, (&block_ids[block_offset..block_end]).to_vec())
+            (
+                (&block_ids[block_offset..block_end]).to_vec(),
+                block_map.filled_token_len,
+            )
         } else {
-            (0, Vec::new())
+            (Vec::new(), 0)
         }
     }
 
@@ -283,29 +285,29 @@ impl BlockManager {
             .map_or(0, |block_map| block_map.num_allocated_slots)
     }
 
+    pub fn can_alloc_seq(&self, seq: &Sequence, watermark: f32) -> bool {
+        let num_blocks = self.get_num_required_blocks(seq);
+        self.block_allocator.can_alloc_blocks(num_blocks, watermark)
+    }
+
     pub fn can_alloc_blocks(&self, num_blocks: usize, watermark: f32) -> bool {
         self.block_allocator.can_alloc_blocks(num_blocks, watermark)
     }
 
-    fn lookup_block_id(&mut self, hash: u64) -> Option<u32> {
-        match self.hash_block_table.entry(hash) {
-            Entry::Occupied(entry) => {
-                let block_id = *entry.get();
-                let block = self.block_allocator.get_block(block_id);
-                if block.get_hash() == hash {
-                    return Some(block_id);
-                } else {
-                    entry.remove_entry();
-                }
+    fn lookup_block_id(&self, hash: u64) -> Option<u32> {
+        if let Some(&block_id) = self.hash_block_table.get(&hash) {
+            let block = self.block_allocator.get_block(block_id);
+            if block.get_hash() == hash {
+                return Some(block_id);
+            } else {
+                return None;
             }
-            Entry::Vacant(_) => {}
         }
 
         None
     }
 
-    fn get_prefix_reusable_blocks(&mut self, seq: &Sequence) -> Vec<u32> {
-        let token_ids = &seq.token_ids;
+    pub fn get_prefix_cache_blocks(&self, token_ids: &Vec<u32>) -> Vec<u32> {
         let total_token_len = token_ids.len();
 
         let mut block_ids: Vec<u32> = Vec::new();
@@ -329,6 +331,39 @@ impl BlockManager {
         block_ids
     }
 
+    pub fn get_prefix_cache_blocks_range(
+        &self,
+        token_ids: &Vec<u32>,
+        start: usize,
+        end: usize,
+    ) -> (Vec<u32>, usize) {
+        let start = start.div_ceil(self.block_size) * self.block_size;
+        let end = end.min(token_ids.len());
+        assert!(start <= end);
+
+        let mut block_ids: Vec<u32> = Vec::new();
+        for token_offset in (start..end).step_by(self.block_size) {
+            let token_end = min(token_offset + self.block_size, end);
+            let sub_token_ids = &token_ids[token_offset..token_end];
+
+            if sub_token_ids.len() < self.block_size {
+                break;
+            }
+
+            let hash = compute_hash(&token_ids[..token_end]);
+
+            if let Some(block_id) = self.lookup_block_id(hash) {
+                block_ids.push(block_id);
+            } else {
+                break;
+            }
+        }
+
+        let matched_token_len = block_ids.len() * self.block_size;
+
+        (block_ids, start + matched_token_len)
+    }
+
     fn alloc_blocks(&mut self, seq: &Sequence) -> usize {
         let mut num_allocated_slots = self.get_num_allocated_slots(seq.seq_id);
 
@@ -336,19 +371,9 @@ impl BlockManager {
         let total_token_len = token_ids.len();
         let num_alloc_tokens = total_token_len - num_allocated_slots;
 
-        let mut reused_token_len = 0;
         let mut add_block_ids: Vec<u32> = Vec::new();
 
-        if num_allocated_slots == 0 {
-            for block_id in self.get_prefix_reusable_blocks(seq) {
-                self.block_allocator.alloc_block_by_id(block_id);
-
-                num_allocated_slots += self.block_size;
-                reused_token_len += self.block_size;
-
-                add_block_ids.push(block_id);
-            }
-        } else if num_allocated_slots > 0 {
+        if num_allocated_slots > 0 {
             let last_block_id = self
                 .get_last_block_id(seq.seq_id)
                 .expect("Not found a last block");
@@ -398,11 +423,7 @@ impl BlockManager {
             .and_modify(|block_map| {
                 block_map.append_block_ids(&mut add_block_ids, num_alloc_tokens)
             })
-            .or_insert(BlockMap::new(
-                add_block_ids,
-                num_alloc_tokens,
-                reused_token_len,
-            ));
+            .or_insert(BlockMap::new(add_block_ids, num_alloc_tokens, 0));
 
         num_alloc_tokens
     }
@@ -418,6 +439,73 @@ impl BlockManager {
 
         new_block.token_ids = token_ids.clone();
         new_block
+    }
+
+    pub fn init_prefix_cache_blocks(&mut self, seq: &Sequence) -> usize {
+        if self.seq_block_mapping_table.get(&seq.seq_id).is_some() {
+            return 0;
+        }
+
+        let mut reused_token_len = 0;
+        let mut add_block_ids: Vec<u32> = Vec::new();
+
+        for block_id in self.get_prefix_cache_blocks(&seq.token_ids) {
+            self.block_allocator.alloc_block_by_id(block_id);
+
+            reused_token_len += self.block_size;
+
+            add_block_ids.push(block_id);
+        }
+
+        self.seq_block_mapping_table.insert(
+            seq.seq_id,
+            BlockMap::new(add_block_ids, reused_token_len, reused_token_len),
+        );
+
+        reused_token_len
+    }
+
+    pub fn reserve_tokens(&mut self, token_ids: &Vec<u32>, start: usize, end: usize) -> Vec<u32> {
+        let start = start.div_ceil(self.block_size) * self.block_size;
+        let end = end.min(token_ids.len());
+        assert!(start <= end);
+
+        let mut new_block_ids: Vec<u32> = Vec::new();
+
+        for token_offset in (start..end).step_by(self.block_size) {
+            let token_end = min(token_offset + self.block_size, end);
+            let sub_token_ids = &token_ids[token_offset..token_end];
+
+            let block = self.block_allocator.alloc_block();
+
+            // We are going to refresh (update) the newly allocated block,
+            // so we need to remove the entry of the new block that remains in the hash table
+            self.hash_block_table.remove(&block.get_hash());
+
+            block.append_tokens(&mut sub_token_ids.to_vec());
+
+            if block.get_num_empty_slots() == 0 {
+                let hash = compute_hash(&token_ids[..token_end]);
+                block.set_hash(hash);
+                self.hash_block_table.insert(hash, block.id);
+            }
+
+            new_block_ids.push(block.id);
+        }
+
+        for block_id in new_block_ids.iter() {
+            self.block_allocator.free_block(*block_id);
+        }
+
+        new_block_ids
+    }
+
+    pub fn get_num_prefix_cache_blocks(&self, token_ids: &Vec<u32>) -> usize {
+        self.get_prefix_cache_blocks(&token_ids).len()
+    }
+
+    pub fn get_prefix_cache_token_len(&self, token_ids: &Vec<u32>) -> usize {
+        self.get_prefix_cache_blocks(&token_ids).len() * self.block_size
     }
 
     pub fn reserve_blocks(&mut self, seq: &Sequence) -> usize {
@@ -472,20 +560,14 @@ impl BlockManager {
         )?;
 
         let dst_token_ids = &dst_seq.token_ids;
-        let dst_seq_len = dst_token_ids.len();
         let max_share_token_len = min(
-            dst_seq_len - 1,
+            dst_token_ids.len(),
             self.get_num_allocated_slots(src_seq.seq_id),
         );
 
         let mut shared_token_len = 0;
-        let mut iter = dst_token_ids.chunks_exact(self.block_size);
-        for block_id in src_block_map.block_ids.iter() {
-            let dst_sub_token_ids = match iter.next() {
-                Some(token_ids) => token_ids,
-                None => break,
-            };
-
+        let token_iter = dst_token_ids.chunks_exact(self.block_size);
+        for (block_id, dst_sub_token_ids) in src_block_map.block_ids.iter().zip(token_iter) {
             let dst_sub_token_len = dst_sub_token_ids.len();
             if shared_token_len + dst_sub_token_len > max_share_token_len {
                 break;
@@ -515,24 +597,17 @@ impl BlockManager {
         self.seq_block_mapping_table
             .entry(seq_id)
             .and_modify(|block_map| {
-                block_map.filled_token_len = min(
-                    block_map.filled_token_len + new_filled_token_len,
-                    block_map.num_allocated_slots,
-                )
+                assert!(new_filled_token_len <= block_map.num_allocated_slots);
+                block_map.filled_token_len = new_filled_token_len
             });
     }
 
-    pub fn free(&mut self, seq: &Sequence) -> Result<(), BlockAllocError> {
-        let block_map = self
-            .seq_block_mapping_table
-            .remove(&seq.seq_id)
-            .ok_or(BlockAllocError::NotFoundBlockTable { seq_id: seq.seq_id })?;
-
-        for block_id in block_map.block_ids.iter() {
-            self.block_allocator.free_block(*block_id);
+    pub fn free(&mut self, seq_id: u64) {
+        if let Some(block_map) = self.seq_block_mapping_table.remove(&seq_id) {
+            for block_id in block_map.block_ids.iter() {
+                self.block_allocator.free_block(*block_id);
+            }
         }
-
-        Ok(())
     }
 
     pub fn get_block_usage(&self) -> f32 {

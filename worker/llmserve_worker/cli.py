@@ -90,21 +90,24 @@ class WorkerService(worker_pb2_grpc.WorkerServicer):
         gpu_cache_size = request.gpu_cache_size
         host_cache_size = request.host_cache_size
 
-        num_blocks, kv_worker_params = self.worker.init_cache(gpu_cache_size)
+        kv_worker_params = self.worker.init_cache(gpu_cache_size,
+                                                  host_cache_size)
 
         kv_uds_path = "{}-kv".format(self.uds_path)
 
         kv_worker = mp.Process(target=init_kv_cache,
                                args=(
                                    kv_worker_params,
-                                   host_cache_size,
                                    torch.cuda.current_device(),
                                    kv_uds_path,
                                ))
         kv_worker.start()
         self.kv_worker = kv_worker
 
-        return InitCacheResponse(num_blocks=num_blocks)
+        return InitCacheResponse(
+            num_gpu_blocks=kv_worker_params.num_gpu_blocks,
+            num_host_blocks=kv_worker_params.num_host_blocks,
+        )
 
 
 class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
@@ -149,11 +152,11 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
         request: GetDescriptorsRequest,
         context: grpc.aio.ServicerContext,
     ) -> GetDescriptorsResponse:
-        seq_ids = request.seq_ids
+        block_ids = request.block_ids
 
-        descs, num_blocks = self.worker.get_descriptors(seq_ids)
+        descs = self.worker.get_descriptors(block_ids)
 
-        return GetDescriptorsResponse(descs=descs, num_blocks=num_blocks)
+        return GetDescriptorsResponse(descs=descs)
 
     async def PullKV(
         self,
@@ -162,16 +165,12 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
     ) -> PullKVResponse:
         peer_name = request.peer_name
         descs = request.descs
-        num_blocks = request.num_blocks
-        session_id = request.session_id
-        seq_ids = request.seq_ids
+        block_ids = request.block_ids
 
         ret = self.worker.pull_kv(
             peer_name,
             descs,
-            num_blocks,
-            session_id,
-            seq_ids,
+            block_ids,
         )
 
         return PullKVResponse(success=ret)
@@ -179,7 +178,6 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
 
 def init_kv_cache(
     params: KVWorkerParams,
-    host_cache_size: int,
     device: int,
     uds_path: str,
 ):
@@ -192,7 +190,6 @@ def init_kv_cache(
     worker = KVWorker(
         name=uds_path,
         params=params,
-        host_cache_size=host_cache_size,
     )
     logger.info(f"Launching KV Cache on GPU {device}...")
 

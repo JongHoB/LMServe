@@ -83,17 +83,19 @@ impl Llm for LLMService {
     ) -> Result<Response<GetDescriptorsResponse>, Status> {
         let get_desc_request = request.into_inner();
 
-        let session_id = get_desc_request.session_id;
+        let token_ids = get_desc_request.token_ids;
+        let start = get_desc_request.start;
+        let end = get_desc_request.end;
 
-        let (descs, num_blocks) = self
+        let (descs, last_token_idx) = self
             .engine
-            .get_descriptors(session_id)
+            .get_descriptors(token_ids, start as usize, end as usize)
             .await
             .expect("Failed to get descriptors");
 
         Ok(Response::new(GetDescriptorsResponse {
             descs,
-            num_blocks: num_blocks as u64,
+            last_token_idx: last_token_idx as u64,
         }))
     }
 }

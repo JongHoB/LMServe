@@ -5,6 +5,5 @@ pub mod infer_task;
 pub mod pb;
 pub mod scheduler;
 pub mod sequence;
-pub mod session_manager;
 pub mod stub;
 pub mod worker;

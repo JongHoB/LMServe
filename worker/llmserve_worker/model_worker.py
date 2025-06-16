@@ -195,13 +195,11 @@ class ModelWorker:
         self.top_p = top_p
         self.temperature = temperature
 
-    def init_cache(self,
-                   cache_size: int = None,
-                   num_blocks: int = None) -> Tuple[int, KVWorkerParams]:
-        if cache_size is None and num_blocks is None:
-            raise ValueError(
-                "At least one of 'cache_size' or 'num_blocks' must be given.")
-
+    def init_cache(
+        self,
+        gpu_cache_size: int,
+        host_cache_size: int = None,
+    ) -> KVWorkerParams:
         model_config = self.model_config
 
         block_size = self.block_size
@@ -213,16 +211,11 @@ class ModelWorker:
         dtype_byte = torch.finfo(dtype).bits // 8
         kv_block_size = (block_size * num_kv_heads * head_dim * dtype_byte)
 
-        if cache_size is not None:
-            num_available_blocks = (int(cache_size) //
-                                    (num_layers * 2 * kv_block_size))
-            if num_blocks is not None:
-                num_blocks = min(num_blocks, num_available_blocks)
-            else:
-                num_blocks = num_available_blocks
+        num_gpu_blocks = (int(gpu_cache_size) //
+                          (num_layers * 2 * kv_block_size))
 
         self.kv_caches = torch.empty(num_layers,
-                                     num_blocks,
+                                     num_gpu_blocks,
                                      2,
                                      block_size,
                                      num_kv_heads,
@@ -274,6 +267,12 @@ class ModelWorker:
             layer.register_forward_hook(post_hook)
 
         # Generate KVWorkerParams
+        if host_cache_size is not None:
+            num_host_blocks = (int(host_cache_size) //
+                               (num_layers * 2 * kv_block_size))
+        else:
+            num_host_blocks = 0
+
         kv_cache_metadata = self.kv_caches.untyped_storage()._share_cuda_()
         pre_event_handles = [
             e.ipc_handle() for e in self.kv_worker_handle.pre_events
@@ -285,7 +284,8 @@ class ModelWorker:
         kv_worker_params = KVWorkerParams(
             kv_cache_metadata,
             num_layers,
-            num_blocks,
+            num_gpu_blocks,
+            num_host_blocks,
             dtype,
             pre_event_handles,
             post_event_handles,
@@ -293,7 +293,7 @@ class ModelWorker:
             kv_queue,
         )
 
-        return num_blocks, kv_worker_params
+        return kv_worker_params
 
     def _make_inputs(
             self, inputs: List[InferInput], use_cache=True,

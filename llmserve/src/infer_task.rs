@@ -81,10 +81,10 @@ impl InferInput {
         seq_id: u64,
         input_ids: Vec<u32>,
         filled_token_len: usize,
+        context_len: usize,
         block_ids: Vec<u32>,
     ) -> InferInput {
         let input_len = input_ids.len() as u64;
-        let context_len = input_ids.len() + filled_token_len;
 
         InferInput {
             seq_id,

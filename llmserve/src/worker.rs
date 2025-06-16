@@ -91,10 +91,12 @@ impl ModelWorker {
         Ok(outputs)
     }
 
-    async fn init_cache(&self, request: InitCacheRequest) -> Result<u64> {
+    async fn init_cache(&self, request: InitCacheRequest) -> Result<(u64, u64)> {
         let response = self.client.lock().await.init_cache(request).await?;
-        let num_blocks = response.into_inner().num_blocks;
-        Ok(num_blocks)
+        let response = response.into_inner();
+        let num_gpu_blocks = response.num_gpu_blocks;
+        let num_host_blocks = response.num_host_blocks;
+        Ok((num_gpu_blocks, num_host_blocks))
     }
 }
 
@@ -126,7 +128,7 @@ impl KVWorker {
         Ok(peer_name)
     }
 
-    async fn get_descriptors(&self, request: GetDescriptorsRequest) -> Result<(Bytes, usize)> {
+    async fn get_descriptors(&self, request: GetDescriptorsRequest) -> Result<Bytes> {
         let response = self
             .client
             .lock()
@@ -136,8 +138,7 @@ impl KVWorker {
             .into_inner();
 
         let descs = response.descs;
-        let num_blocks = response.num_blocks;
-        Ok((descs, num_blocks as usize))
+        Ok(descs)
     }
 
     async fn pull_kv(&self, request: PullKvRequest) -> Result<bool> {
@@ -323,7 +324,11 @@ impl ModelWorkerGroup {
         Ok((total, peak))
     }
 
-    pub async fn init_cache(&self, gpu_cache_size: usize, host_cache_size: usize) -> Result<u64> {
+    pub async fn init_cache(
+        &self,
+        gpu_cache_size: usize,
+        host_cache_size: usize,
+    ) -> Result<(u64, u64)> {
         let request = InitCacheRequest {
             gpu_cache_size: gpu_cache_size as u64,
             host_cache_size: host_cache_size as u64,
@@ -334,9 +339,10 @@ impl ModelWorkerGroup {
             })
             .await?;
 
-        let num_blocks = extract_if_all_equal(&outputs).expect("Error: not all values are equal");
+        let (num_gpu_blocks, num_host_blocks) =
+            extract_if_all_equal(&outputs).expect("Error: not all values are equal");
 
-        Ok(num_blocks)
+        Ok((num_gpu_blocks, num_host_blocks))
     }
 
     pub async fn infer(
@@ -427,35 +433,22 @@ impl KVWorkerGroup {
         Ok(peer_names)
     }
 
-    pub async fn get_descriptors(&self, seq_ids: Vec<u64>) -> Result<(Vec<Bytes>, usize)> {
-        let num_seqs = seq_ids.len();
-        let request = GetDescriptorsRequest { seq_ids };
-        let outputs = self
+    pub async fn get_descriptors(&self, block_ids: Vec<u32>) -> Result<Vec<Bytes>> {
+        let request = GetDescriptorsRequest { block_ids };
+        let descs = self
             .run_workers_gather(request, move |worker, request| async move {
                 worker.get_descriptors(request).await
             })
             .await?;
 
-        let mut descs: Vec<Bytes> = Vec::with_capacity(num_seqs);
-        let mut num_blocks_list: Vec<usize> = Vec::with_capacity(num_seqs);
-
-        for (desc, num_blocks) in outputs {
-            descs.push(desc);
-            num_blocks_list.push(num_blocks);
-        }
-        let num_blocks =
-            extract_if_all_equal(&num_blocks_list).expect("Error: not all values are equal");
-
-        Ok((descs, num_blocks))
+        Ok(descs)
     }
 
     pub async fn pull_kv(
         &self,
         peer_names: Vec<String>,
         descs: Vec<Bytes>,
-        num_blocks: usize,
-        session_id: String,
-        seq_ids: Vec<u64>,
+        block_ids: Vec<u32>,
     ) -> Result<bool> {
         assert!(descs.len() == self.workers.len());
 
@@ -464,9 +457,7 @@ impl KVWorkerGroup {
             requests.push(PullKvRequest {
                 peer_name,
                 descs: desc,
-                num_blocks: num_blocks as u64,
-                session_id: session_id.clone(),
-                seq_ids: seq_ids.clone(),
+                block_ids: block_ids.clone(),
             })
         }
 

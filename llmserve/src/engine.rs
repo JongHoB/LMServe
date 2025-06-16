@@ -1,15 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use tokio::join;
 use tokio::sync::{Mutex, Notify};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::infer_task::InferTask;
 use crate::scheduler::Scheduler;
 use crate::sequence::{SeqStatus, Sequence};
-use crate::session_manager::SessionManager;
 use crate::stub::LLMEngineStub;
 use crate::worker::{KVWorkerGroup, ModelWorkerGroup};
 
@@ -42,7 +41,6 @@ pub struct LLMEngine {
     kv_remote_agent_table: Arc<Mutex<HashMap<String, Vec<String>>>>,
 
     scheduler: Arc<Mutex<Scheduler>>,
-    session_manager: Arc<Mutex<SessionManager>>,
 
     last_log_time: u64,
 }
@@ -77,11 +75,14 @@ impl LLMEngine {
         // Convert GBs -> Bytes
         let host_cache_size = host_cache_size * (1 << 30);
 
-        let num_blocks = model_worker_group
+        let (num_gpu_blocks, num_host_blocks) = model_worker_group
             .init_cache(cache_size, host_cache_size)
             .await
             .unwrap_or_else(|e| panic!("Failed to init KV cache: {e}"));
-        info!("Created {num_blocks} KV cache blocks.");
+        info!("Created {num_gpu_blocks} KV cache blocks on GPU memory.");
+        if num_host_blocks > 0 {
+            info!("Created {num_host_blocks} KV cache blocks on Host memory.");
+        }
 
         let kv_worker_group = KVWorkerGroup::init(tp_size)
             .await
@@ -97,7 +98,8 @@ impl LLMEngine {
             max_seq_len,
             max_num_batched_tokens,
             block_size,
-            num_blocks as usize,
+            num_gpu_blocks as usize,
+            num_host_blocks as usize,
         );
 
         Ok(LLMEngine {
@@ -113,12 +115,11 @@ impl LLMEngine {
             kv_local_agent_metadata,
             kv_remote_agent_table: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Arc::new(Mutex::new(scheduler)),
-            session_manager: Arc::new(Mutex::new(SessionManager::new())),
             last_log_time: 0,
         })
     }
 
-    pub async fn add_request(
+    async fn add_request(
         &self,
         input_ids: Vec<u32>,
         num_samples: u16,
@@ -138,51 +139,13 @@ impl LLMEngine {
             seqs.push(seq);
         }
 
-        let seq_ids: Vec<u64> = seqs.iter().map(|s| s.seq_id).collect();
-
-        {
-            self.session_manager
-                .lock()
-                .await
-                .add_session(session_id.clone(), seq_ids.clone());
-        }
-
-        let cached = match server_url {
-            Some(server_url) => {
-                let peer_names = match self.check_remote_agent_metadata(server_url.clone()).await {
-                    Some(peer_names) => peer_names,
-                    None => {
-                        let remote_kv_agent_metadata = self
-                            .get_remote_kv_agent_metadata(server_url.clone())
-                            .await?;
-                        let new_peer_names = self
-                            .add_remote_agent_metadata(server_url.clone(), remote_kv_agent_metadata)
-                            .await?;
-                        new_peer_names
-                    }
-                };
-
-                let (remote_descs, num_blocks) = self
-                    .get_remote_descriptors(server_url.clone(), session_id.clone())
-                    .await?;
-
-                self.pull_kv(
-                    peer_names,
-                    remote_descs,
-                    num_blocks,
-                    session_id.clone(),
-                    seq_ids,
-                )
-                .await?
-            }
-            None => false,
-        };
-
-        for seq in seqs.iter_mut() {
-            seq.cached = cached;
-        }
-
         let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
+
+        if let Some(server_url) = server_url {
+            if let Err(e) = self.pull_task_data(&infer_task, server_url).await {
+                warn!("Failed to pull task data: {e}");
+            };
+        }
 
         {
             self.scheduler.lock().await.add(infer_task);
@@ -191,17 +154,12 @@ impl LLMEngine {
         Ok(())
     }
 
-    pub async fn iter(&self) -> Option<Vec<InferTask>> {
+    async fn iter(&self) -> Option<Vec<InferTask>> {
         let (infer_inputs, fetch_block_mappings, write_back_block_mappings) =
             { self.scheduler.lock().await.schedule() };
         if infer_inputs.len() == 0 {
             return None;
         }
-
-        let write_back_block_mappings = match fetch_block_mappings.len() > 0 {
-            true => vec![],
-            false => write_back_block_mappings,
-        };
 
         let wait_before_execute = fetch_block_mappings.len() > 0;
         let record_after_execute = write_back_block_mappings.len() > 0;
@@ -226,17 +184,17 @@ impl LLMEngine {
         }
     }
 
-    pub fn get_local_agent_metadata(&self) -> Vec<Bytes> {
+    fn get_local_agent_metadata(&self) -> Vec<Bytes> {
         self.kv_local_agent_metadata.clone()
     }
 
-    pub async fn check_remote_agent_metadata(&self, server_url: String) -> Option<Vec<String>> {
+    async fn check_remote_agent_metadata(&self, server_url: String) -> Option<Vec<String>> {
         let kv_agent_table = self.kv_remote_agent_table.lock().await;
 
         kv_agent_table.get(&server_url).cloned()
     }
 
-    pub async fn add_remote_agent_metadata(
+    async fn add_remote_agent_metadata(
         &self,
         server_url: String,
         remote_agent_metadata: Vec<Bytes>,
@@ -262,53 +220,128 @@ impl LLMEngine {
         Ok(new_peer_names)
     }
 
-    pub async fn get_descriptors(&self, session_id: String) -> Result<(Vec<Bytes>, usize)> {
-        let seq_ids = {
-            self.session_manager
-                .lock()
-                .await
-                .get_seq_ids(session_id)
-                .expect("Not found session id")
+    async fn get_peer_names(&self, server_url: String) -> Result<Vec<String>> {
+        let peer_names = match self.check_remote_agent_metadata(server_url.clone()).await {
+            Some(peer_names) => peer_names,
+            None => {
+                let remote_kv_agent_metadata = self
+                    .get_remote_kv_agent_metadata(server_url.clone())
+                    .await?;
+                let new_peer_names = self
+                    .add_remote_agent_metadata(server_url.clone(), remote_kv_agent_metadata)
+                    .await?;
+                new_peer_names
+            }
         };
 
-        let (descs, num_blocks) = self
+        Ok(peer_names)
+    }
+
+    async fn pull_task_data(&self, infer_task: &InferTask, server_url: String) -> Result<()> {
+        let peer_names = self.get_peer_names(server_url.clone()).await?;
+        let seqs = infer_task.get_active_seqs();
+        let head_seq = seqs.first().expect("No active sequence found");
+        let token_ids = head_seq.get_token_ids().to_vec();
+
+        let cached_token_len = {
+            self.scheduler
+                .lock()
+                .await
+                .get_host_cache_token_len(&token_ids)
+        };
+
+        let num_cached_blocks = cached_token_len / self.block_size;
+        let max_pull_blocks = (token_ids.len() - 1) / self.block_size;
+
+        if num_cached_blocks >= max_pull_blocks {
+            return Ok(());
+        }
+
+        let (remote_descs, last_token_idx) = self
+            .get_remote_descriptors(
+                server_url.clone(),
+                token_ids.clone(),
+                cached_token_len,
+                token_ids.len(),
+            )
+            .await?;
+
+        if remote_descs.is_empty() {
+            return Ok(());
+        }
+
+        // TODO(jinu): Lock the blocks befor pull_kv(), and unlock them after it finishes.
+        let block_ids = {
+            self.scheduler
+                .lock()
+                .await
+                .host_block_manager
+                .reserve_tokens(&token_ids, cached_token_len, last_token_idx)
+        };
+
+        if !self.pull_kv(peer_names, remote_descs, block_ids).await {
+            return Err(anyhow!("Failed to pull KV"));
+        }
+
+        Ok(())
+    }
+
+    async fn get_descriptors(
+        &self,
+        token_ids: Vec<u32>,
+        start: usize,
+        end: usize,
+    ) -> Result<(Vec<Bytes>, usize)> {
+        let (block_ids, last_token_idx) = {
+            self.scheduler
+                .lock()
+                .await
+                .get_host_cache_block_range(token_ids, start, end)
+        };
+
+        if block_ids.is_empty() {
+            return Ok((vec![], last_token_idx));
+        }
+
+        let descs = self
             .kv_worker_group
-            .get_descriptors(seq_ids)
+            .get_descriptors(block_ids)
             .await
             .unwrap_or_else(|e| panic!("Failed to get descriptors: {e}"));
 
-        Ok((descs, num_blocks))
+        Ok((descs, last_token_idx))
     }
 
-    pub async fn get_remote_descriptors(
+    async fn get_remote_descriptors(
         &self,
         remote_url: String,
-        session_id: String,
+        token_ids: Vec<u32>,
+        start: usize,
+        end: usize,
     ) -> Result<(Vec<Bytes>, usize)> {
-        let (descs, num_blocks) = LLMEngineStub::get_descriptors(remote_url, session_id).await?;
+        let (descs, last_token_idx) =
+            LLMEngineStub::get_descriptors(remote_url, token_ids, start, end).await?;
 
-        Ok((descs, num_blocks))
+        Ok((descs, last_token_idx))
     }
 
-    pub async fn get_remote_kv_agent_metadata(&self, remote_url: String) -> Result<Vec<Bytes>> {
+    async fn get_remote_kv_agent_metadata(&self, remote_url: String) -> Result<Vec<Bytes>> {
         Ok(LLMEngineStub::get_remote_kv_agent_metadata(remote_url).await?)
     }
 
-    pub async fn pull_kv(
+    async fn pull_kv(
         &self,
         peer_names: Vec<String>,
         remote_descs: Vec<Bytes>,
-        num_blocks: usize,
-        session_id: String,
-        seq_ids: Vec<u64>,
-    ) -> Result<bool> {
+        block_ids: Vec<u32>,
+    ) -> bool {
         let ret = self
             .kv_worker_group
-            .pull_kv(peer_names, remote_descs, num_blocks, session_id, seq_ids)
+            .pull_kv(peer_names, remote_descs, block_ids)
             .await
             .unwrap_or_else(|e| panic!("Failed to pull KVs: {e}"));
 
-        Ok(ret)
+        ret
     }
 }
 
@@ -429,14 +462,19 @@ impl LLMEngineWrapper {
         Ok(engine_output)
     }
 
-    pub async fn get_descriptors(&self, session_id: String) -> Result<(Vec<Bytes>, usize)> {
-        let (descs, num_blocks) = self.engine.get_descriptors(session_id).await?;
+    pub async fn get_descriptors(
+        &self,
+        token_ids: Vec<u32>,
+        start: usize,
+        end: usize,
+    ) -> Result<(Vec<Bytes>, usize)> {
+        let (descs, last_token_idx) = self.engine.get_descriptors(token_ids, start, end).await?;
 
-        Ok((descs, num_blocks))
+        Ok((descs, last_token_idx))
     }
 
     pub async fn get_kv_agent_metadata(&self) -> Result<Vec<Bytes>> {
-        Ok(self.engine.kv_local_agent_metadata.clone())
+        Ok(self.engine.get_local_agent_metadata())
     }
 
     pub async fn run_engine(&self) -> Result<()> {

@@ -35,9 +35,13 @@ message GenerateResponse {
 
 message GetKVAgentMetadataResponse { repeated bytes metadata = 1; }
 
-message GetDescriptorsRequest { string session_id = 1; }
+message GetDescriptorsRequest {
+  repeated uint32 token_ids = 1;
+  uint64 start = 2;
+  uint64 end = 3;
+}
 
 message GetDescriptorsResponse {
   repeated bytes descs = 1;
-  uint64 num_blocks = 2;
+  uint64 last_token_idx = 2;
 }
