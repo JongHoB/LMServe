@@ -241,6 +241,9 @@ class Qwen2ForCausalLM(nn.Module):
             input_params=input_params,
             kv_caches=kv_caches,
         )
+        cu_output_lens = input_params.cu_seqlens_q[1:]
+        indices = cu_output_lens - 1
+        hidden_states = hidden_states[indices]
         logits = self.lm_head(hidden_states)
 
         return logits

@@ -474,9 +474,7 @@ class ModelWorker:
         )
 
         # The code below does sampling.
-        cu_output_lens = input_params.cu_seqlens_q[1:]
-        indices = cu_output_lens - 1
-        last_hidden_states = logits[indices].unsqueeze(1)
+        last_hidden_states = logits.unsqueeze(1)
 
         next_token_ids, probs, all_probs = sample(
             last_hidden_states,
@@ -506,11 +504,8 @@ class ModelWorker:
                             kv_caches=self.kv_caches if use_cache else None,
                             input_params=input_params)
 
-        last_token_indptrs = input_params.cu_seqlens_q[1:] - 1
-        last_hidden_states = logits[last_token_indptrs]
-
         next_token_ids_tensor, probs_tensor, all_probs_tensor = sample(
-            last_hidden_states,
+            logits,
             top_k=self.top_k,
             top_p=self.top_p,
             temperature=self.temperature,
