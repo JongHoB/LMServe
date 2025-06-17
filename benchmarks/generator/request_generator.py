@@ -1,18 +1,10 @@
-import random
+import numpy as np
 
 from typing import List
-
-from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from .request import APIRequest
-
-# dataset_name: ('hg dataset path', 'subset', 'split', 'prompt', 'output')
-dataset_cols = {
-    "alpaca": ("tatsu-lab/alpaca", None, "train", "instruction", "output"),
-    "humaneval":
-    ("openai/openai_humaneval", None, "test", "prompt", "canonical_solution"),
-}
+from .dataset_config import get_dataset_config, DatasetConfig
 
 
 def load_and_preprocess_dataset(
@@ -20,23 +12,15 @@ def load_and_preprocess_dataset(
     tokenizer_name: str,
     max_length: int,
 ):
-    if dataset_name in dataset_cols.keys():
-        (dataset_path, subset, split, prompt_col,
-         output_col) = dataset_cols[dataset_name]
-    else:
-        raise RuntimeError(
-            f"The dataset '{dataset_name}' does not specify which column to"
-            "tokenize. If you want to use this dataset, please define"
-            "'dataset_cols' in 'request_generator.py'")
-
-    dataset = load_dataset(dataset_path, subset, split=split)
+    config: DatasetConfig = get_dataset_config(dataset_name)
+    dataset = config.load_fn(**config.args)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
     def tokenize_function(data):
-        tokenized_input = tokenizer(data[prompt_col],
+        tokenized_input = tokenizer(data[config.prompt_col],
                                     truncation=True,
                                     max_length=max_length)
-        tokenized_output = tokenizer(data[output_col],
+        tokenized_output = tokenizer(data[config.output_col],
                                      truncation=True,
                                      max_length=max_length)
 
@@ -44,8 +28,8 @@ def load_and_preprocess_dataset(
         output_ids = tokenized_output["input_ids"]
 
         return {
-            "prompt": data[prompt_col],
-            "output": data[output_col],
+            "prompt": data[config.prompt_col],
+            "output": data[config.output_col],
             "input_ids": input_ids,
             "output_ids": output_ids,
         }
@@ -105,15 +89,16 @@ def generate_radom_requests(
 ) -> List[APIRequest]:
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    vocab_size = tokenizer.vocab_size
 
     requests: List[APIRequest] = []
     while len(requests) < num_requests:
-        input_len = random.randint(min(max_input_len, 4), max_input_len)
-        output_len = random.randint(min(max_output_len, 32), max_output_len)
+        input_len = np.random.randint(min(max_input_len, 4), max_input_len)
+        output_len = np.random.randint(min(max_output_len, 32), max_output_len)
         if (input_len + output_len) > max_seq_len:
             continue
 
-        input_ids = [3] * input_len
+        input_ids = np.random.randint(vocab_size, size=input_len)
         prompt = tokenizer.decode(input_ids)
 
         request = APIRequest(

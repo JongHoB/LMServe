@@ -9,8 +9,8 @@ import numpy as np
 from typing import List
 from collections.abc import Callable
 
-from request import (generate_requests, generate_radom_requests, APIRequest,
-                     APIResponse)
+from generator import (generate_requests, generate_radom_requests, APIRequest,
+                       APIResponse, supported_dataset_names)
 
 background_tasks = set()
 
@@ -175,7 +175,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--input-len", type=int)
     parser.add_argument("--output-len", type=int)
-    parser.add_argument("--dataset", type=str, choices=["alpaca", "humaneval"])
+    parser.add_argument("--dataset", type=str, choices=supported_dataset_names)
     parser.add_argument("--max-seq-len", type=int, default=4096)
     parser.add_argument("--num-requests", type=int, default=1000)
     parser.add_argument("--tokenizer", type=str, default="Qwen/Qwen2.5-0.5B")
