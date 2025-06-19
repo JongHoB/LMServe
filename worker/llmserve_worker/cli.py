@@ -123,8 +123,8 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
         fetch_block_mappings = request.fetch_block_mappings
         write_through_block_mappings = request.write_through_block_mappings
 
-        self.worker.transfer(fetch_block_mappings,
-                             write_through_block_mappings)
+        await self.worker.transfer(fetch_block_mappings,
+                                   write_through_block_mappings)
 
         return KVTransferResponse(success=True)
 
@@ -168,7 +168,7 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
         descs = request.descs
         block_ids = request.block_ids
 
-        ret = self.worker.pull_kv(
+        ret = await self.worker.pull_kv(
             peer_name,
             descs,
             block_ids,

@@ -2,7 +2,9 @@ import torch
 import pycuda.driver as cuda
 import numpy as np
 import torch.multiprocessing as mp
+import asyncio
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 from nixl._api import nixl_agent
@@ -44,6 +46,7 @@ class KVWorker:
         self,
         name: str,
         params: KVWorkerParams,
+        thread_pool_size: int = 4,
     ):
         num_layers = params.num_layers
         num_gpu_blocks = params.num_gpu_blocks
@@ -111,6 +114,7 @@ class KVWorker:
         self.reg_desc = reg_desc
         self.kv_agent_metadata = kv_agent.get_agent_metadata()
         self.kv_agent = kv_agent
+        self.thread_pool = ThreadPoolExecutor(max_workers=thread_pool_size)
 
     def fetch(
         self,
@@ -144,33 +148,55 @@ class KVWorker:
                 stream=stream,
             )
 
-    def transfer(
+    async def fetch_kv_blocks(
         self,
         fetch_block_mappings: List[BlockMapping],
-        write_through_block_mappings: List[BlockMapping],
+        stream: cuda.Stream,
     ) -> None:
         for layer_idx in range(self.num_layers):
             if len(fetch_block_mappings) > 0:
                 for block_mapping in fetch_block_mappings:
-                    self.fetch(
-                        block_mapping,
-                        layer_idx,
-                        self.htod_stream,
-                    )
+                    self.fetch(block_mapping, layer_idx, stream)
                 self.kv_worker_handle.pre_events[layer_idx].record()
-                self.kv_worker_handle.model_queue.put(b'')
 
+                self.kv_worker_handle.model_queue.put(b"")
+
+                # This allows the fetch task to yield execution to other tasks.
+                await asyncio.sleep(0)
+
+    async def write_through_kv_blocks(
+        self,
+        write_through_block_mappings: List[BlockMapping],
+        stream: cuda.Stream,
+    ) -> None:
+        for layer_idx in range(self.num_layers):
             if len(write_through_block_mappings) > 0:
+                while self.kv_worker_handle.kv_queue.empty():
+                    await asyncio.sleep(1e-5)
                 self.kv_worker_handle.kv_queue.get()
+
                 self.dtoh_stream.wait_for_event(
                     self.kv_worker_handle.post_events[layer_idx])
                 for block_mapping in write_through_block_mappings:
-                    self.write_through(
-                        block_mapping,
-                        layer_idx,
-                        self.dtoh_stream,
-                    )
+                    self.write_through(block_mapping, layer_idx, stream)
 
+    async def transfer(
+        self,
+        fetch_block_mappings: List[BlockMapping],
+        write_through_block_mappings: List[BlockMapping],
+    ) -> None:
+        kv_transfer_tasks = [
+            self.fetch_kv_blocks(
+                fetch_block_mappings,
+                self.htod_stream,
+            ),
+            self.write_through_kv_blocks(
+                write_through_block_mappings,
+                self.dtoh_stream,
+            )
+        ]
+
+        await asyncio.gather(*kv_transfer_tasks)
         self.htod_stream.synchronize()
         self.dtoh_stream.synchronize()
 
@@ -184,7 +210,7 @@ class KVWorker:
 
         return descs
 
-    def pull_kv(
+    async def pull_kv(
         self,
         peer_name: str,
         remote_descs: bytes,
@@ -218,6 +244,8 @@ class KVWorker:
                 return False
             elif state == "DONE":
                 break
+            else:
+                await asyncio.sleep(1e-5)
 
         return True
 

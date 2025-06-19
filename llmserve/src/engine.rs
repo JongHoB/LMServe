@@ -36,6 +36,7 @@ pub struct LLMEngine {
 
     model_worker_group: ModelWorkerGroup,
     kv_worker_group: KVWorkerGroup,
+    kv_agent_worker_group: KVWorkerGroup,
 
     kv_local_agent_metadata: Vec<Bytes>,
     kv_remote_agent_table: Arc<Mutex<HashMap<String, Vec<String>>>>,
@@ -88,7 +89,11 @@ impl LLMEngine {
             .await
             .unwrap_or_else(|e| panic!("Failed to initialize KV worker group: {e}"));
 
-        let kv_local_agent_metadata = kv_worker_group
+        let kv_agent_worker_group = KVWorkerGroup::init(tp_size)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to initialize KV worker group: {e}"));
+
+        let kv_local_agent_metadata = kv_agent_worker_group
             .get_local_agent_metadata()
             .await
             .unwrap_or_else(|e| panic!("Failed to get local agent metadata: {e}"));
@@ -112,6 +117,7 @@ impl LLMEngine {
             tp_size,
             model_worker_group,
             kv_worker_group,
+            kv_agent_worker_group,
             kv_local_agent_metadata,
             kv_remote_agent_table: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Arc::new(Mutex::new(scheduler)),
@@ -208,7 +214,7 @@ impl LLMEngine {
         }
 
         let new_peer_names = self
-            .kv_worker_group
+            .kv_agent_worker_group
             .add_remote_agent_metadata(remote_agent_metadata)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to set KV agent metadata: {e}"))?;
@@ -308,7 +314,7 @@ impl LLMEngine {
         }
 
         let descs = self
-            .kv_worker_group
+            .kv_agent_worker_group
             .get_descriptors(block_ids)
             .await
             .unwrap_or_else(|e| panic!("Failed to get descriptors: {e}"));
@@ -340,7 +346,7 @@ impl LLMEngine {
         block_ids: Vec<u32>,
     ) -> bool {
         let ret = self
-            .kv_worker_group
+            .kv_agent_worker_group
             .pull_kv(peer_names, remote_descs, block_ids)
             .await
             .unwrap_or_else(|e| panic!("Failed to pull KVs: {e}"));
