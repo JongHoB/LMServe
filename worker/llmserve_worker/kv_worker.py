@@ -128,7 +128,7 @@ class KVWorker:
                 stream=stream,
             )
 
-    def write_back(
+    def write_through(
         self,
         block_map: BlockMapping,
         layer_idx: int,
@@ -147,7 +147,7 @@ class KVWorker:
     def transfer(
         self,
         fetch_block_mappings: List[BlockMapping],
-        write_back_block_mappings: List[BlockMapping],
+        write_through_block_mappings: List[BlockMapping],
     ) -> None:
         for layer_idx in range(self.num_layers):
             if len(fetch_block_mappings) > 0:
@@ -160,12 +160,12 @@ class KVWorker:
                 self.kv_worker_handle.pre_events[layer_idx].record()
                 self.kv_worker_handle.model_queue.put(b'')
 
-            if len(write_back_block_mappings) > 0:
+            if len(write_through_block_mappings) > 0:
                 self.kv_worker_handle.kv_queue.get()
                 self.dtoh_stream.wait_for_event(
                     self.kv_worker_handle.post_events[layer_idx])
-                for block_mapping in write_back_block_mappings:
-                    self.write_back(
+                for block_mapping in write_through_block_mappings:
+                    self.write_through(
                         block_mapping,
                         layer_idx,
                         self.dtoh_stream,

@@ -51,6 +51,14 @@ impl InferTask {
             .collect()
     }
 
+    pub fn get_head_seq(&self) -> Option<&Sequence> {
+        if let Some(seq) = self.get_active_seqs().first() {
+            Some(seq)
+        } else {
+            None
+        }
+    }
+
     pub fn get_status(&self) -> InferTaskStatus {
         self.status
     }

@@ -76,7 +76,7 @@ message BlockMapping {
 
 message KVTransferRequest {
   repeated BlockMapping fetch_block_mappings = 1;
-  repeated BlockMapping write_back_block_mappings = 2;
+  repeated BlockMapping write_through_block_mappings = 2;
 }
 
 message KVTransferResponse { bool success = 1; }

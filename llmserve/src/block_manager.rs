@@ -4,6 +4,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use ahash::AHasher;
+use tracing::warn;
 
 use crate::sequence::Sequence;
 use utils::collections::FifoSet;
@@ -219,6 +220,7 @@ pub struct BlockManager {
     seq_block_mapping_table: HashMap<u64, BlockMap>,
     hash_block_table: HashMap<u64, u32>, // HashMap<hash value, block id>
     block_allocator: BlockAllocator,
+    seq_block_buffer: HashMap<u64, Vec<u32>>,
 }
 
 impl BlockManager {
@@ -230,6 +232,7 @@ impl BlockManager {
             seq_block_mapping_table: HashMap::new(),
             hash_block_table: HashMap::new(),
             block_allocator,
+            seq_block_buffer: HashMap::new(),
         }
     }
 
@@ -279,7 +282,7 @@ impl BlockManager {
         Some(last_block_id.clone())
     }
 
-    fn get_num_allocated_slots(&self, seq_id: u64) -> usize {
+    pub fn get_num_allocated_slots(&self, seq_id: u64) -> usize {
         self.seq_block_mapping_table
             .get(&seq_id)
             .map_or(0, |block_map| block_map.num_allocated_slots)
@@ -322,6 +325,10 @@ impl BlockManager {
             let hash = compute_hash(&token_ids[..token_end]);
 
             if let Some(block_id) = self.lookup_block_id(hash) {
+                let block = self.block_allocator.get_block(block_id);
+                if block.token_ids != sub_token_ids {
+                    warn!("Hash collision on lookup: token_ids mismatch detected");
+                }
                 block_ids.push(block_id);
             } else {
                 break;
@@ -353,6 +360,10 @@ impl BlockManager {
             let hash = compute_hash(&token_ids[..token_end]);
 
             if let Some(block_id) = self.lookup_block_id(hash) {
+                let block = self.block_allocator.get_block(block_id);
+                if block.token_ids != sub_token_ids {
+                    warn!("Hash collision on lookup: token_ids mismatch detected");
+                }
                 block_ids.push(block_id);
             } else {
                 break;
@@ -428,19 +439,6 @@ impl BlockManager {
         num_alloc_tokens
     }
 
-    fn copy_block(&mut self, src_block_id: u32) -> &mut Block {
-        let token_ids = {
-            let src_block = self.block_allocator.get_block(src_block_id);
-            src_block.token_ids.clone()
-        };
-        let new_block = self.block_allocator.alloc_block();
-
-        self.hash_block_table.remove(&new_block.get_hash());
-
-        new_block.token_ids = token_ids.clone();
-        new_block
-    }
-
     pub fn init_prefix_cache_blocks(&mut self, seq: &Sequence) -> usize {
         if self.seq_block_mapping_table.get(&seq.seq_id).is_some() {
             return 0;
@@ -465,7 +463,13 @@ impl BlockManager {
         reused_token_len
     }
 
-    pub fn reserve_tokens(&mut self, token_ids: &Vec<u32>, start: usize, end: usize) -> Vec<u32> {
+    pub fn hold_seq_tokens(
+        &mut self,
+        seq_id: u64,
+        token_ids: &Vec<u32>,
+        start: usize,
+        end: usize,
+    ) -> Vec<u32> {
         let start = start.div_ceil(self.block_size) * self.block_size;
         let end = end.min(token_ids.len());
         assert!(start <= end);
@@ -478,26 +482,29 @@ impl BlockManager {
 
             let block = self.block_allocator.alloc_block();
 
-            // We are going to refresh (update) the newly allocated block,
-            // so we need to remove the entry of the new block that remains in the hash table
-            self.hash_block_table.remove(&block.get_hash());
-
             block.append_tokens(&mut sub_token_ids.to_vec());
 
             if block.get_num_empty_slots() == 0 {
                 let hash = compute_hash(&token_ids[..token_end]);
                 block.set_hash(hash);
-                self.hash_block_table.insert(hash, block.id);
             }
 
             new_block_ids.push(block.id);
         }
 
-        for block_id in new_block_ids.iter() {
-            self.block_allocator.free_block(*block_id);
-        }
+        self.seq_block_buffer.insert(seq_id, new_block_ids.clone());
 
         new_block_ids
+    }
+
+    pub fn release_seq_tokens(&mut self, seq_id: u64) {
+        if let Some(block_ids) = self.seq_block_buffer.remove(&seq_id) {
+            for block_id in block_ids {
+                let block = self.block_allocator.get_block(block_id);
+                self.hash_block_table.insert(block.get_hash(), block_id);
+                self.block_allocator.free_block(block_id);
+            }
+        }
     }
 
     pub fn get_num_prefix_cache_blocks(&self, token_ids: &Vec<u32>) -> usize {
@@ -510,87 +517,6 @@ impl BlockManager {
 
     pub fn reserve_blocks(&mut self, seq: &Sequence) -> usize {
         self.alloc_blocks(seq)
-    }
-
-    pub fn extend_blocks(
-        &mut self,
-        seq: &Sequence,
-        blocks_to_copy: &mut HashMap<u32, Vec<u32>>,
-    ) -> usize {
-        // TODO(jinu): Remove copy blocks.
-        let copy_block_id = self
-            .get_last_block_id(seq.seq_id)
-            .filter(|block_id| {
-                let block = self.block_allocator.get_block(*block_id);
-                block.ref_cnt > 1 && block.get_num_empty_slots() > 0
-            })
-            .map(|block_id| block_id);
-
-        if let Some(copy_block_id) = copy_block_id {
-            let new_block_id = self.copy_block(copy_block_id).id;
-            self.block_allocator.free_block(copy_block_id);
-
-            self.seq_block_mapping_table
-                .entry(seq.seq_id)
-                .and_modify(|block_map| {
-                    if let Some(last_block_id) = block_map.block_ids.last_mut() {
-                        *last_block_id = new_block_id;
-                    }
-                });
-
-            blocks_to_copy
-                .entry(copy_block_id)
-                .and_modify(|block_ids| block_ids.push(new_block_id))
-                .or_insert(vec![new_block_id]);
-        }
-
-        self.alloc_blocks(seq)
-    }
-
-    pub fn share_blocks(
-        &mut self,
-        src_seq: &Sequence,
-        dst_seq: &Sequence,
-    ) -> Result<Vec<u32>, BlockAllocError> {
-        let mut share_block_ids: Vec<u32> = Vec::new();
-        let src_block_map = self.seq_block_mapping_table.get(&src_seq.seq_id).ok_or(
-            BlockAllocError::NotFoundBlockTable {
-                seq_id: src_seq.seq_id,
-            },
-        )?;
-
-        let dst_token_ids = &dst_seq.token_ids;
-        let max_share_token_len = min(
-            dst_token_ids.len(),
-            self.get_num_allocated_slots(src_seq.seq_id),
-        );
-
-        let mut shared_token_len = 0;
-        let token_iter = dst_token_ids.chunks_exact(self.block_size);
-        for (block_id, dst_sub_token_ids) in src_block_map.block_ids.iter().zip(token_iter) {
-            let dst_sub_token_len = dst_sub_token_ids.len();
-            if shared_token_len + dst_sub_token_len > max_share_token_len {
-                break;
-            }
-
-            let block = self.block_allocator.get_block_mut(*block_id);
-            if block.token_ids != dst_sub_token_ids {
-                break;
-            }
-
-            block.ref_cnt += 1;
-            share_block_ids.push(*block_id);
-            shared_token_len += dst_sub_token_len;
-        }
-
-        if share_block_ids.len() > 0 {
-            self.seq_block_mapping_table.insert(
-                dst_seq.seq_id,
-                BlockMap::new(share_block_ids, shared_token_len, shared_token_len),
-            );
-        }
-
-        Ok(dst_token_ids[0..shared_token_len].to_vec())
     }
 
     pub fn update_filled_len(&mut self, seq_id: u64, new_filled_token_len: usize) {

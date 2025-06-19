@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use tokio::join;
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
@@ -142,9 +142,7 @@ impl LLMEngine {
         let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
 
         if let Some(server_url) = server_url {
-            if let Err(e) = self.pull_task_data(&infer_task, server_url).await {
-                warn!("Failed to pull task data: {e}");
-            };
+            self.pull_task_data(&infer_task, server_url).await?;
         }
 
         {
@@ -155,20 +153,20 @@ impl LLMEngine {
     }
 
     async fn iter(&self) -> Option<Vec<InferTask>> {
-        let (infer_inputs, fetch_block_mappings, write_back_block_mappings) =
+        let (infer_inputs, fetch_block_mappings, write_through_block_mappings) =
             { self.scheduler.lock().await.schedule() };
         if infer_inputs.len() == 0 {
             return None;
         }
 
         let wait_before_execute = fetch_block_mappings.len() > 0;
-        let record_after_execute = write_back_block_mappings.len() > 0;
+        let record_after_execute = write_through_block_mappings.len() > 0;
 
         let (infer_result, transfer_result) = join!(
             self.model_worker_group
                 .infer(infer_inputs, wait_before_execute, record_after_execute),
             self.kv_worker_group
-                .transfer_kv(fetch_block_mappings, write_back_block_mappings),
+                .transfer_kv(fetch_block_mappings, write_through_block_mappings),
         );
 
         let infer_outputs =
@@ -270,22 +268,28 @@ impl LLMEngine {
             return Ok(());
         }
 
-        // TODO(jinu): Lock the blocks befor pull_kv(), and unlock them after it finishes.
         let block_ids = {
             self.scheduler
                 .lock()
                 .await
-                .host_block_manager
-                .reserve_tokens(&token_ids, cached_token_len, last_token_idx)
+                .hold_seq_tokens(head_seq, cached_token_len, last_token_idx)
         };
 
         if !self.pull_kv(peer_names, remote_descs, block_ids).await {
-            return Err(anyhow!("Failed to pull KV"));
+            warn!("Failed to pull remote task data; scheduling task without retrieved data");
+        }
+
+        {
+            let mut scheduler = self.scheduler.lock().await;
+            // Release sequence tokens that were held during KV pulling.
+            scheduler.release_seq_tokens(head_seq);
+            scheduler.init_prefix_host_cache_blocks(head_seq);
         }
 
         Ok(())
     }
 
+    // TODO(jinu): Pin blocks corresponding to descriptors, and unpin them when transfer completion is notified.
     async fn get_descriptors(
         &self,
         token_ids: Vec<u32>,

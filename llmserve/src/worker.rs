@@ -389,11 +389,11 @@ impl KVWorkerGroup {
     pub async fn transfer_kv(
         &self,
         fetch_block_mappings: Vec<BlockMapping>,
-        write_back_block_mappings: Vec<BlockMapping>,
+        write_through_block_mappings: Vec<BlockMapping>,
     ) -> Result<()> {
         let request = KvTransferRequest {
             fetch_block_mappings,
-            write_back_block_mappings,
+            write_through_block_mappings,
         };
 
         let _ = self
