@@ -14,7 +14,7 @@ use crate::pb::llm::{GenerateRequest, GenerateResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum EngineKind {
-    FULL,
+    ALL,
     PREFILL,
     DECODE,
 }
@@ -24,7 +24,7 @@ impl FromStr for EngineKind {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "full" => Ok(EngineKind::FULL),
+            "all" => Ok(EngineKind::ALL),
             "prefill" => Ok(EngineKind::PREFILL),
             "decode" => Ok(EngineKind::DECODE),
             _ => Err(format!("Unknown engine kind: {}", s)),
@@ -99,7 +99,7 @@ impl EngineRouter {
     // FIXME(jinu)
     pub async fn generate(&self, request: GenerateRequest) -> Result<GenerateResponse> {
         let response;
-        if let Ok((mut client, _)) = self.get_client(EngineKind::FULL).await {
+        if let Ok((mut client, _)) = self.get_client(EngineKind::ALL).await {
             response = client.generate(request).await?.into_inner();
         } else {
             response = self.generate_dist(request).await?;

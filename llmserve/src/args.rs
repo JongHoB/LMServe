@@ -4,7 +4,7 @@ use serde::Serialize;
 #[derive(Parser, Debug, Serialize)]
 #[command(author, version, about)]
 pub struct LLMEngineArgs {
-    #[arg(long, default_value = "full")]
+    #[arg(long, default_value = "all")]
     pub kind: String,
 
     #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
