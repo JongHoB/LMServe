@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::io::BufReader;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 
 use clap::Parser;
@@ -48,6 +50,16 @@ const MASTER_PORT: u32 = 6000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let root_dir = env::var("LLMSERVE_HOME").expect("LLMSERVE_HOME is not set");
+    let bin_path: PathBuf = PathBuf::from(root_dir).join("bin");
+
+    if !bin_path.exists() {
+        eprintln!(
+            "Error: bin directory does not exist at {}",
+            bin_path.display()
+        );
+    }
+
     utils::logging::init_tracing();
 
     let args = CLIArgs::parse();
@@ -147,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine_envs.insert("WORKER_GROUP_UDS_PATH", worker_group_uds_path.to_string());
 
         info!("Launching llmserve (group_id = {group_id})...");
-        let engine = Command::new("llmserve")
+        let engine = Command::new(bin_path.join("llmserve"))
             .args(&to_cmd_args(&engine_args))
             .envs(engine_envs)
             .spawn()?;
@@ -168,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     info!("Launching api_server...");
-    let mut api_server = Command::new("api_server")
+    let mut api_server = Command::new(bin_path.join("api_server"))
         .args(&to_cmd_args(&api_server_args))
         .spawn()?;
 

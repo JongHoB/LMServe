@@ -1,21 +1,33 @@
-.PHONY: install build clean
+BIN_DIR    := bin
+TARGET_DIR := target/release
+BINARIES   := llmserve api_server launcher
 
-install-rust: install-llmserve install-api-server
+.PHONY: all build copy-bins clean
 
-install: install-llmserve install-api-server install-worker
+all: develop
 
-build: install-worker
-	cargo build
+develop: $(addprefix build-,$(BINARIES)) build-worker copy-bins
 
-install-llmserve:
-	cargo install --path llmserve
+install: $(addprefix install-,$(BINARIES)) install-worker copy-bins
 
-install-api-server:
-	cargo install --path api_server
+build-worker:
+	@$(MAKE) -C worker build-dev
 
 install-worker:
-	cd worker && make install
+	@$(MAKE) -C worker install
+
+build-%: %
+	@echo "Building $*..."
+	cargo build -p $< --release --locked
+
+copy-bins:
+	@mkdir -p $(BIN_DIR)
+	@for bin in $(BINARIES); do \
+		echo "Copying $$bin to $(BIN_DIR)/"; \
+		cp $(TARGET_DIR)/$$bin $(BIN_DIR)/; \
+	done
 
 clean:
 	cargo clean
-	cd worker && make clean
+	@rm -rf $(BIN_DIR)
+	@$(MAKE) -C worker clean
