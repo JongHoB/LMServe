@@ -250,5 +250,5 @@ class KVWorker:
         return True
 
     def __del__(self):
-        self.ctx.pop()
         self.kv_agent.deregister_memory(self.reg_desc)
+        self.ctx.pop()

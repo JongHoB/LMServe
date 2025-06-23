@@ -1,7 +1,8 @@
 import os
 import torch
 import torch.distributed as dist
-from llmserve_worker.models.parallel import initialize_model_parallel
+from llmserve_worker.models.parallel import (
+    initialize_model_parallel, destroy_model_parallel)
 
 
 def init_distributed(
@@ -30,3 +31,8 @@ def init_distributed(
     torch.distributed.all_reduce(torch.zeros(1).cuda())
 
     initialize_model_parallel(world_size)
+
+
+def deinit_distributed() -> None:
+    dist.destroy_process_group()
+    destroy_model_parallel()

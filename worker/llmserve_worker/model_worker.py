@@ -13,7 +13,7 @@ from llmserve_worker.models.input_params import InputParams
 from llmserve_worker.models.sampler import sample
 from llmserve_worker.ops.cache_ops import copy_blocks
 from llmserve_worker.pb.worker_pb2 import InferInput, InferOutput
-from llmserve_worker.dist_utils import init_distributed
+from llmserve_worker.dist_utils import init_distributed, deinit_distributed
 from llmserve_worker.kv_worker import KVWorkerHandle, KVWorkerParams
 
 
@@ -560,4 +560,5 @@ class ModelWorker:
         return get_total_size(self.model)
 
     def __del__(self):
+        deinit_distributed()
         self.ctx.pop()
