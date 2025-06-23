@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -5,6 +6,7 @@ use clap::Parser;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing::debug;
+use tracing_futures::Instrument;
 
 use llmserve::args::LLMEngineArgs;
 use llmserve::engine::LLMEngineWrapper;
@@ -106,12 +108,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = LLMEngineArgs::parse();
 
-    let address = args.address.parse().unwrap_or_else(|_| {
+    let address: SocketAddr = args.address.parse().unwrap_or_else(|_| {
         panic!(
             "Invalid address '{}'. Expected format: <host>:<port>",
             &args.address
         )
     });
+
+    let root_span = tracing::info_span!("LLMServer", port=%address.port(), kind= %args.kind);
+    let _root_guard = root_span.clone().entered();
 
     let engine = Arc::new(
         LLMEngineWrapper::new(
@@ -135,9 +140,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run the engine asynchronously in the background
     let engine_clone = engine.clone();
-    tokio::spawn(async move {
-        engine_clone.run_engine().await.unwrap();
-    });
+    tokio::spawn(
+        async move {
+            engine_clone.run_engine().await.unwrap();
+        }
+        .instrument(root_span.clone()),
+    );
 
     let svc = LlmServer::new(llm_service);
 

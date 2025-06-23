@@ -6,7 +6,7 @@ use tokio::{sync::Mutex, time::sleep};
 
 use tonic::transport::Channel;
 
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::infer_task::{InferInput, InferOutput};
 use crate::pb::worker::kv_worker_client::KvWorkerClient;
@@ -59,7 +59,7 @@ impl<T: GrpcClient> Worker for WorkerImpl<T> {
         let client = loop {
             match T::connect(address.clone()).await {
                 Ok(client) => {
-                    info!("Successfully connected to {address}");
+                    debug!("Successfully connected to {address}");
                     break client;
                 }
                 Err(error) => {

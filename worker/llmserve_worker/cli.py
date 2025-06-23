@@ -1,3 +1,5 @@
+import os
+import sys
 import typer
 import grpc
 import asyncio
@@ -29,6 +31,12 @@ from llmserve_worker.pb.worker_pb2 import (
     PullKVResponse,
 )
 
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
+logger.remove()
+logger.add(sys.stderr, level=log_level)
+# Enable console output of errors from gRPC methods
+logging.basicConfig(level=getattr(logging, log_level))
 
 app = typer.Typer()
 
@@ -182,9 +190,6 @@ def init_kv_cache(
     device: int,
     uds_path: str,
 ):
-    # Enable console output of errors from gRPC methods
-    logging.basicConfig(level=logging.INFO)
-
     torch.cuda.set_device(device)
 
     # TODO(jinu): Set the name using local IP instead of uds path.
@@ -201,14 +206,14 @@ def init_kv_cache(
         address = f"unix://{uds_path}"
         server.add_insecure_port(address)
 
-        logger.info(f"KV worker is ready and listening on: {address}")
+        logger.debug(f"KV worker is ready and listening on: {address}")
 
         await server.start()
 
         shutdown_event = asyncio.Event()
 
         def handle_signal():
-            logger.info("Shutdown signal received.")
+            logger.debug("Shutdown signal received.")
             shutdown_event.set()
 
         loop = asyncio.get_running_loop()
@@ -229,9 +234,6 @@ def serve(
     device: int,
     uds_path: str,
 ):
-    # Enable console output of errors from gRPC methods
-    logging.basicConfig(level=logging.INFO)
-
     mp.set_start_method("spawn", force=True)
 
     torch.cuda.set_device(device)
@@ -247,14 +249,14 @@ def serve(
         address = f"unix://{uds_path}"
         server.add_insecure_port(address)
 
-        logger.info(f"Model worker is ready and listening on: {address}")
+        logger.debug(f"Model worker is ready and listening on: {address}")
 
         await server.start()
 
         shutdown_event = asyncio.Event()
 
         def handle_signal():
-            logger.info("Shutdown signal received.")
+            logger.debug("Shutdown signal received.")
             shutdown_event.set()
 
         loop = asyncio.get_running_loop()
