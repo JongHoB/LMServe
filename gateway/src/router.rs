@@ -14,9 +14,9 @@ use crate::pb::llm::{GenerateRequest, GenerateResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum EngineKind {
-    ALL,
-    PREFILL,
-    DECODE,
+    All,
+    Prefill,
+    Decode,
 }
 
 impl FromStr for EngineKind {
@@ -24,9 +24,9 @@ impl FromStr for EngineKind {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "all" => Ok(EngineKind::ALL),
-            "prefill" => Ok(EngineKind::PREFILL),
-            "decode" => Ok(EngineKind::DECODE),
+            "all" => Ok(EngineKind::All),
+            "prefill" => Ok(EngineKind::Prefill),
+            "decode" => Ok(EngineKind::Decode),
             _ => Err(format!("Unknown engine kind: {}", s)),
         }
     }
@@ -34,6 +34,12 @@ impl FromStr for EngineKind {
 
 pub struct EngineRouter {
     mapping_table: Arc<Mutex<HashMap<EngineKind, VecDeque<Endpoint>>>>,
+}
+
+impl Default for EngineRouter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EngineRouter {
@@ -61,7 +67,7 @@ impl EngineRouter {
             sleep(Duration::from_millis(500)).await;
         };
 
-        let response = client.get_kind({}).await?.into_inner();
+        let response = client.get_kind(()).await?.into_inner();
         let kind =
             EngineKind::from_str(&response.kind).unwrap_or_else(|e| panic!("Invalid kind: {e}"));
 
@@ -86,7 +92,7 @@ impl EngineRouter {
             endpoints.rotate_left(1);
 
             endpoints
-                .get(0)
+                .front()
                 .ok_or_else(|| anyhow::anyhow!("Endpoint list for {kind:?} is empty"))?
                 .clone()
         };
@@ -99,7 +105,7 @@ impl EngineRouter {
     // FIXME(jinu)
     pub async fn generate(&self, request: GenerateRequest) -> Result<GenerateResponse> {
         let response;
-        if let Ok((mut client, _)) = self.get_client(EngineKind::ALL).await {
+        if let Ok((mut client, _)) = self.get_client(EngineKind::All).await {
             response = client.generate(request).await?.into_inner();
         } else {
             response = self.generate_dist(request).await?;
@@ -109,8 +115,8 @@ impl EngineRouter {
     }
 
     pub async fn generate_dist(&self, request: GenerateRequest) -> Result<GenerateResponse> {
-        let (mut prefill_client, prefill_uri) = self.get_client(EngineKind::PREFILL).await?;
-        let (mut decode_client, _) = self.get_client(EngineKind::DECODE).await?;
+        let (mut prefill_client, prefill_uri) = self.get_client(EngineKind::Prefill).await?;
+        let (mut decode_client, _) = self.get_client(EngineKind::Decode).await?;
 
         let num_samples = request.num_samples;
         let max_output_len = request.max_output_len;
@@ -128,10 +134,7 @@ impl EngineRouter {
         let p_response: GenerateResponse = prefill_client.generate(p_request).await?.into_inner();
 
         let output_ids = p_response.output_ids;
-        let max_output_len = match max_output_len {
-            Some(max_output_len) => Some(max_output_len - 1),
-            None => None,
-        };
+        let max_output_len = max_output_len.map(|max_output_len| max_output_len - 1);
 
         let d_request = GenerateRequest {
             session_id: request.session_id.clone(),

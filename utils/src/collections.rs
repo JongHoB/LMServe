@@ -6,6 +6,15 @@ pub struct FifoSet<T> {
     order: VecDeque<T>,
 }
 
+impl<T> Default for FifoSet<T>
+where
+    T: Eq + Hash + Copy,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> FifoSet<T>
 where
     T: Eq + Hash + Copy,
@@ -20,9 +29,9 @@ where
     pub fn insert(&mut self, item: T) -> bool {
         if self.items.insert(item) {
             self.order.push_back(item);
-            return true;
+            true
         } else {
-            return false;
+            false
         }
     }
 
@@ -41,6 +50,10 @@ where
 
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

@@ -285,17 +285,15 @@ impl Scheduler {
                 self.try_extend_host_infer_task(&infer_task);
 
                 allocated.push_back(infer_task);
-            } else {
-                if let Some(mut preempt_task) = self.allocated.pop_back() {
-                    self.preempt_infer_task(&mut preempt_task);
-                    self.waiting.push_front(preempt_task);
+            } else if let Some(mut preempt_task) = self.allocated.pop_back() {
+                self.preempt_infer_task(&mut preempt_task);
+                self.waiting.push_front(preempt_task);
 
-                    self.allocated.push_front(infer_task);
-                    continue;
-                } else {
-                    self.waiting.push_front(infer_task);
-                    break;
-                }
+                self.allocated.push_front(infer_task);
+                continue;
+            } else {
+                self.waiting.push_front(infer_task);
+                break;
             }
         }
 
@@ -373,9 +371,7 @@ impl Scheduler {
                     now,
                 );
 
-                let reached_max_len = seq
-                    .max_output_len
-                    .map_or(false, |max| seq.output_len >= max);
+                let reached_max_len = seq.max_output_len.is_some_and(|max| seq.output_len >= max);
 
                 if (!seq.ignore_eos && output.is_eos) || reached_max_len {
                     seq.status = SeqStatus::FINISHED;
@@ -409,7 +405,7 @@ impl Scheduler {
             .get_prefix_cache_blocks_range(&token_ids, start, end)
     }
 
-    pub fn get_host_cache_token_len(&self, token_ids: &Vec<u32>) -> usize {
+    pub fn get_host_cache_token_len(&self, token_ids: &[u32]) -> usize {
         self.host_block_manager
             .get_prefix_cache_token_len(token_ids)
     }

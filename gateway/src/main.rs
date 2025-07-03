@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     let mut engine_router = EngineRouter::new();
     for addr in args.llm_server_addresses.iter() {
         let llm_server_url = format!("http://{}", addr);
-        let _ = engine_router
+        engine_router
             .add_node(&llm_server_url)
             .await
             .unwrap_or_else(|e| panic!("Unable to establish connection to engine ({addr}): {e}"));

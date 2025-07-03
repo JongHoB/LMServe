@@ -42,8 +42,6 @@ pub struct LLMEngine {
     kv_remote_agent_table: Arc<Mutex<HashMap<String, Vec<String>>>>,
 
     scheduler: Arc<Mutex<Scheduler>>,
-
-    last_log_time: u64,
 }
 
 impl LLMEngine {
@@ -122,7 +120,6 @@ impl LLMEngine {
             kv_local_agent_metadata,
             kv_remote_agent_table: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Arc::new(Mutex::new(scheduler)),
-            last_log_time: 0,
         })
     }
 
@@ -162,12 +159,12 @@ impl LLMEngine {
     async fn iter(&self) -> Option<Vec<InferTask>> {
         let (infer_inputs, fetch_block_mappings, write_through_block_mappings) =
             { self.scheduler.lock().await.schedule() };
-        if infer_inputs.len() == 0 {
+        if infer_inputs.is_empty() {
             return None;
         }
 
-        let wait_before_execute = fetch_block_mappings.len() > 0;
-        let record_after_execute = write_through_block_mappings.len() > 0;
+        let wait_before_execute = !fetch_block_mappings.is_empty();
+        let record_after_execute = !write_through_block_mappings.is_empty();
 
         let (infer_result, transfer_result) = join!(
             self.model_worker_group
@@ -178,11 +175,11 @@ impl LLMEngine {
 
         let infer_outputs =
             infer_result.unwrap_or_else(|e| panic!("Failed to execute worker: {e}"));
-        let _ = transfer_result.unwrap_or_else(|e| panic!("Failed to transfer KV: {e}"));
+        transfer_result.unwrap_or_else(|e| panic!("Failed to transfer KV: {e}"));
 
         let finished_tasks = { self.scheduler.lock().await.commit(infer_outputs) };
 
-        if finished_tasks.len() > 0 {
+        if !finished_tasks.is_empty() {
             Some(finished_tasks)
         } else {
             None
@@ -208,7 +205,7 @@ impl LLMEngine {
 
         let peer_names = kv_agent_table
             .entry(server_url.clone())
-            .or_insert_with(|| Vec::new());
+            .or_insert_with(Vec::new);
 
         if !peer_names.is_empty() {
             return Ok(peer_names.clone());
@@ -232,10 +229,9 @@ impl LLMEngine {
                 let remote_kv_agent_metadata = self
                     .get_remote_kv_agent_metadata(server_url.clone())
                     .await?;
-                let new_peer_names = self
-                    .add_remote_agent_metadata(server_url.clone(), remote_kv_agent_metadata)
-                    .await?;
-                new_peer_names
+
+                self.add_remote_agent_metadata(server_url.clone(), remote_kv_agent_metadata)
+                    .await?
             }
         };
 
@@ -337,7 +333,7 @@ impl LLMEngine {
     }
 
     async fn get_remote_kv_agent_metadata(&self, remote_url: String) -> Result<Vec<Bytes>> {
-        Ok(LLMEngineStub::get_remote_kv_agent_metadata(remote_url).await?)
+        LLMEngineStub::get_remote_kv_agent_metadata(remote_url).await
     }
 
     async fn pull_kv(
@@ -346,13 +342,10 @@ impl LLMEngine {
         remote_descs: Vec<Bytes>,
         block_ids: Vec<u32>,
     ) -> bool {
-        let ret = self
-            .kv_agent_worker_group
+        self.kv_agent_worker_group
             .pull_kv(peer_names, remote_descs, block_ids)
             .await
-            .unwrap_or_else(|e| panic!("Failed to pull KVs: {e}"));
-
-        ret
+            .unwrap_or_else(|e| panic!("Failed to pull KVs: {e}"))
     }
 }
 

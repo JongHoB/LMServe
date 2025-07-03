@@ -117,7 +117,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("Launching llm_srv (group_id = {group_id})...");
         let engine = Command::new(bin_path.join("llm_srv"))
-            .args(&to_cmd_args(&llm_srv_args))
+            .args(to_cmd_args(&llm_srv_args))
+            .env("GROUP_ID", group_id.to_string())
             .spawn()?;
 
         llm_servers.push(engine);
@@ -138,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Launching api_server...");
     let mut api_server = Command::new(bin_path.join("api_server"))
-        .args(&to_cmd_args(&api_server_args))
+        .args(to_cmd_args(&api_server_args))
         .spawn()?;
 
     utils::signal_handler::wait_shutdown_signal().await;

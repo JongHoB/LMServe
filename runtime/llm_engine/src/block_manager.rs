@@ -11,8 +11,8 @@ use utils::collections::FifoSet;
 
 #[derive(PartialEq, Eq, Debug)]
 enum BlockStatus {
-    FREE,
-    USED,
+    Free,
+    Used,
 }
 
 #[derive(Debug)]
@@ -37,14 +37,14 @@ impl Block {
             id,
             block_size,
             ref_cnt: 0,
-            status: BlockStatus::FREE,
+            status: BlockStatus::Free,
             token_ids: Vec::new(),
             hash: Default::default(),
         }
     }
 
     fn append_tokens(&mut self, new_token_ids: &mut Vec<u32>) {
-        assert!(self.token_ids.len() + new_token_ids.len() <= self.block_size as usize);
+        assert!(self.token_ids.len() + new_token_ids.len() <= self.block_size);
 
         self.token_ids.append(new_token_ids);
     }
@@ -112,13 +112,13 @@ impl BlockAllocator {
     fn get_block(&self, block_id: u32) -> &Block {
         self.block_pool
             .get(block_id as usize)
-            .expect(&format!("Block ID {} is out of bounds", block_id))
+            .unwrap_or_else(|| panic!("Block ID {} is out of bounds", block_id))
     }
 
     fn get_block_mut(&mut self, block_id: u32) -> &mut Block {
         self.block_pool
             .get_mut(block_id as usize)
-            .expect(&format!("Block ID {} is out of bounds", block_id))
+            .unwrap_or_else(|| panic!("Block ID {} is out of bounds", block_id))
     }
 
     fn can_alloc_blocks(&self, num_required_blocks: usize, watermark: f32) -> bool {
@@ -141,16 +141,16 @@ impl BlockAllocator {
         let block = self
             .block_pool
             .get_mut(block_id as usize)
-            .expect(&format!("Block ID {} is out of bounds", block_id));
+            .unwrap_or_else(|| panic!("Block ID {} is out of bounds", block_id));
 
-        if block.status == BlockStatus::USED {
+        if block.status == BlockStatus::Used {
             panic!("Cannot allocate block {block_id}: alread in used.");
         }
 
         block.token_ids.clear();
         block.hash = Default::default();
 
-        block.status = BlockStatus::USED;
+        block.status = BlockStatus::Used;
         block.ref_cnt = 1;
         block
     }
@@ -158,13 +158,13 @@ impl BlockAllocator {
     fn free_block(&mut self, block_id: u32) {
         let block = self.get_block_mut(block_id);
         assert!(
-            block.status != BlockStatus::FREE || block.ref_cnt <= 0,
+            block.status != BlockStatus::Free || block.ref_cnt <= 0,
             "Double free detected for block {}.",
             block_id
         );
         block.ref_cnt -= 1;
         if block.ref_cnt == 0 {
-            block.status = BlockStatus::FREE;
+            block.status = BlockStatus::Free;
             self.free_block_ids.insert(block_id);
         }
     }
@@ -173,14 +173,14 @@ impl BlockAllocator {
         let block = self
             .block_pool
             .get_mut(block_id as usize)
-            .expect(&format!("Block ID {} is out of bounds", block_id));
+            .unwrap_or_else(|| panic!("Block ID {} is out of bounds", block_id));
 
-        if block.status == BlockStatus::FREE {
+        if block.status == BlockStatus::Free {
             assert!(
                 self.free_block_ids.remove(&block_id),
                 "BrokenAllocatorError: block {block_id} is free but not in free list"
             );
-            block.status = BlockStatus::USED;
+            block.status = BlockStatus::Used;
         }
         block.ref_cnt += 1;
         block
@@ -255,7 +255,7 @@ impl BlockManager {
             block_end = block_end.min(block_ids.len());
 
             (
-                (&block_ids[block_offset..block_end]).to_vec(),
+                block_ids[block_offset..block_end].to_vec(),
                 block_map.filled_token_len,
             )
         } else {
@@ -279,7 +279,7 @@ impl BlockManager {
     fn get_last_block_id(&self, seq_id: u64) -> Option<u32> {
         let block_map = self.seq_block_mapping_table.get(&seq_id)?;
         let last_block_id = block_map.block_ids.last()?;
-        Some(last_block_id.clone())
+        Some(*last_block_id)
     }
 
     pub fn get_num_allocated_slots(&self, seq_id: u64) -> usize {
@@ -310,7 +310,7 @@ impl BlockManager {
         None
     }
 
-    pub fn get_prefix_cache_blocks(&self, token_ids: &Vec<u32>) -> Vec<u32> {
+    pub fn get_prefix_cache_blocks(&self, token_ids: &[u32]) -> Vec<u32> {
         let total_token_len = token_ids.len();
 
         let mut block_ids: Vec<u32> = Vec::new();
@@ -340,7 +340,7 @@ impl BlockManager {
 
     pub fn get_prefix_cache_blocks_range(
         &self,
-        token_ids: &Vec<u32>,
+        token_ids: &[u32],
         start: usize,
         end: usize,
     ) -> (Vec<u32>, usize) {
@@ -440,7 +440,7 @@ impl BlockManager {
     }
 
     pub fn init_prefix_cache_blocks(&mut self, seq: &Sequence) -> usize {
-        if self.seq_block_mapping_table.get(&seq.seq_id).is_some() {
+        if self.seq_block_mapping_table.contains_key(&seq.seq_id) {
             return 0;
         }
 
@@ -466,7 +466,7 @@ impl BlockManager {
     pub fn hold_seq_tokens(
         &mut self,
         seq_id: u64,
-        token_ids: &Vec<u32>,
+        token_ids: &[u32],
         start: usize,
         end: usize,
     ) -> Vec<u32> {
@@ -507,12 +507,12 @@ impl BlockManager {
         }
     }
 
-    pub fn get_num_prefix_cache_blocks(&self, token_ids: &Vec<u32>) -> usize {
-        self.get_prefix_cache_blocks(&token_ids).len()
+    pub fn get_num_prefix_cache_blocks(&self, token_ids: &[u32]) -> usize {
+        self.get_prefix_cache_blocks(token_ids).len()
     }
 
-    pub fn get_prefix_cache_token_len(&self, token_ids: &Vec<u32>) -> usize {
-        self.get_prefix_cache_blocks(&token_ids).len() * self.block_size
+    pub fn get_prefix_cache_token_len(&self, token_ids: &[u32]) -> usize {
+        self.get_prefix_cache_blocks(token_ids).len() * self.block_size
     }
 
     pub fn reserve_blocks(&mut self, seq: &Sequence) -> usize {
