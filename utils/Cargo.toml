@@ -1,17 +1,12 @@
 [package]
 name = "utils"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
-chrono = "0.4.41"
-tracing="0.1"
-tracing-subscriber = { version = "0.3.0", features = ["env-filter"] }
-tokio = { version = "1", features = ["signal"] }
-
-[dependencies.uuid]
-version = "1.16.0"
-# Lets you generate random UUIDs
-features = [
-    "v4",
-]
+chrono = { workspace = true }
+tracing={ workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio = { workspace = true, features = ["signal"] }
+uuid= { workspace = true, features = ["v4"] }

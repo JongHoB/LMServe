@@ -1,14 +1,15 @@
-/target
+target
+bin
 
 *.swp
-*.lock
 tags
 
 *__pycache__*
 *.egg-info
 
-api_server/src/pb/*.rs
-llmserve/src/pb/*.rs
-worker/llmserve_worker/pb/*.py
+**/pb/*.rs
+**/pb/*.py
 
 target
+
+.venv

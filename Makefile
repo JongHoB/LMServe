@@ -1,24 +1,25 @@
 BIN_DIR    := bin
 TARGET_DIR := target/release
-BINARIES   := llmserve api_server launcher
+PACKAGES   := llm_srv llm_engine gateway launcher
+BINARIES   := llm_srv api_server launcher
 
 .PHONY: all build copy-bins clean
 
 all: develop
 
-develop: $(addprefix build-,$(BINARIES)) build-worker copy-bins
+develop: $(addprefix build-,$(PACKAGES)) build-worker copy-bins
 
-install: $(addprefix install-,$(BINARIES)) install-worker copy-bins
+install: $(addprefix install-,$(PACKAGES)) install-worker copy-bins
 
 build-worker:
-	@$(MAKE) -C worker build-dev
+	@$(MAKE) -C runtime/worker build-dev
 
 install-worker:
-	@$(MAKE) -C worker install
+	@$(MAKE) -C runtime/worker install
 
-build-%: %
+build-%:
 	@echo "Building $*..."
-	cargo build -p $< --release --locked
+	cargo build -p $* --release --locked
 
 copy-bins:
 	@mkdir -p $(BIN_DIR)

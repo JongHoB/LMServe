@@ -1,3 +1,44 @@
 [workspace]
 resolver = "2"
-members = [ "api_server", "utils", "launcher", "llmserve" ]
+members = [
+    "utils",
+    "runtime/llm_engine",
+    "runtime/llm_srv",
+    "gateway",
+    "launcher"
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Jinwoo Jeong <jwjeong@csl.korea.ac.kr>"]
+edition = "2024"
+
+[workspace.dependencies]
+utils = { path = "utils" }
+llm_engine = { path = "runtime/llm_engine" }
+llm_srv = { path = "runtime/llm_srv" }
+gateway = { path = "gateway" }
+launcher = { path = "launcher" }
+
+anyhow = "1.0.98"
+tonic = "0.13"
+tokio = { version = "1", features = ["full"] }
+prost = "0.13.5"
+nix = { version = "0.30.1", features = ["signal"] }
+axum = "0.8.4"
+serde = { version="1.0.219", features = ["derive"] }
+tracing="0.1"
+tracing-subscriber = "0.3.19"
+clap = { version = "4.5", features = ["derive"] }
+futures = "0.3"
+tracing-futures = "0.2.5"
+ahash = "0.8.12"
+async-trait = "0.1.88"
+chrono = "0.4.41"
+rand = "0.9.1"
+serde_json = "1.0.140"
+serde_yaml = "0.9.34"
+tokenizers = "0.20"
+tokio-stream = "0.1.17"
+tonic-build = "0.13"
+uuid = "1.17.0"

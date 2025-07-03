@@ -1,0 +1,224 @@
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::path::Path;
+use std::process::{Child, Command};
+use std::sync::Arc;
+
+use anyhow::Result;
+use clap::Parser;
+use rand::seq::SliceRandom;
+use tonic::transport::Server;
+use tonic::{Request, Response, Status};
+use tracing::{debug, info};
+use tracing_futures::Instrument;
+
+use llm_engine::engine::LLMEngineWrapper;
+use llm_srv::args::LLMSrvArgs;
+use llm_srv::pb::llm::llm_server::{Llm, LlmServer};
+use llm_srv::pb::llm::{
+    GenerateRequest, GenerateResponse, GetDescriptorsRequest, GetDescriptorsResponse,
+    GetKindResponse, GetKvAgentMetadataResponse,
+};
+
+const WORKER_GROUP_UDS_PATH_PREFIX: &str = "/tmp/llmserve/group";
+
+pub struct LLMService {
+    kind: String,
+    engine: Arc<LLMEngineWrapper>,
+}
+
+#[tonic::async_trait]
+impl Llm for LLMService {
+    #[allow(unused_variables)]
+    async fn get_kind(&self, request: Request<()>) -> Result<Response<GetKindResponse>, Status> {
+        Ok(Response::new(GetKindResponse {
+            kind: self.kind.clone(),
+        }))
+    }
+
+    async fn generate(
+        &self,
+        request: Request<GenerateRequest>,
+    ) -> Result<Response<GenerateResponse>, Status> {
+        let generate_request = request.into_inner();
+
+        let session_id = generate_request.session_id;
+        let input_ids = generate_request.input_ids;
+        let num_samples = generate_request.num_samples;
+        let max_output_len = generate_request.max_output_len;
+        let ignore_eos = generate_request.ignore_eos;
+        let server_url = generate_request.server_url;
+
+        let output = self
+            .engine
+            .generate(
+                input_ids,
+                num_samples as u16,
+                session_id,
+                max_output_len.map(|x| x as usize),
+                ignore_eos,
+                server_url,
+            )
+            .await
+            .expect("Failed to generate");
+
+        Ok(Response::new(GenerateResponse {
+            session_id: output.session_id,
+            output_ids: output.output_ids,
+            token_latencies: output.token_latencies,
+        }))
+    }
+
+    #[allow(unused_variables)]
+    async fn get_kv_agent_metadata(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<GetKvAgentMetadataResponse>, Status> {
+        let local_agent_metadata = self
+            .engine
+            .get_kv_agent_metadata()
+            .await
+            .expect("Failed to get KV agent metadat");
+
+        Ok(Response::new(GetKvAgentMetadataResponse {
+            metadata: local_agent_metadata,
+        }))
+    }
+
+    async fn get_descriptors(
+        &self,
+        request: Request<GetDescriptorsRequest>,
+    ) -> Result<Response<GetDescriptorsResponse>, Status> {
+        let get_desc_request = request.into_inner();
+
+        let token_ids = get_desc_request.token_ids;
+        let start = get_desc_request.start;
+        let end = get_desc_request.end;
+
+        let (descs, last_token_idx) = self
+            .engine
+            .get_descriptors(token_ids, start as usize, end as usize)
+            .await
+            .expect("Failed to get descriptors");
+
+        Ok(Response::new(GetDescriptorsResponse {
+            descs,
+            last_token_idx: last_token_idx as u64,
+        }))
+    }
+}
+
+fn random_available_port(range: std::ops::Range<u16>) -> Option<u16> {
+    let mut ports: Vec<u16> = range.collect();
+    ports.shuffle(&mut rand::rng());
+
+    for port in ports {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        if TcpListener::bind(addr).is_ok() {
+            return Some(port);
+        }
+    }
+    None
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    utils::logging::init_tracing();
+
+    let args = LLMSrvArgs::parse();
+
+    let address: SocketAddr = args.address.parse().unwrap_or_else(|_| {
+        panic!(
+            "Invalid address '{}'. Expected format: <host>:<port>",
+            &args.address
+        )
+    });
+
+    let root_span = tracing::info_span!("LLMServer", port=%address.port(), kind= %args.kind);
+    let _root_guard = root_span.clone().entered();
+
+    let group_id = env::var("GROUP_ID").unwrap_or(String::from("0"));
+    let devices = args.devices.unwrap_or((0..args.tp_size).collect());
+
+    let worker_group_uds_path = format!("{}-{}", WORKER_GROUP_UDS_PATH_PREFIX, group_id);
+    let worker_port = random_available_port(6000..7000).expect("Not found available port");
+
+    let mut workers: Vec<Child> = Vec::new();
+    for (device, rank) in devices.iter().zip(0..args.tp_size) {
+        let uds_path = format!("{}/model-{}", worker_group_uds_path, rank);
+
+        std::fs::create_dir_all(Path::new(&uds_path).parent().unwrap())?;
+        if Path::new(&uds_path).exists() {
+            fs::remove_file(Path::new(&uds_path))
+                .expect("Failed to remove existing UDS socket file");
+        }
+
+        let worker_args = vec![
+            args.model_name.clone(),
+            args.block_size.to_string(),
+            device.to_string(),
+            uds_path.to_string(),
+        ];
+
+        let mut worker_envs = HashMap::new();
+        worker_envs.insert("RANK", rank.to_string());
+        worker_envs.insert("WORLD_SIZE", args.tp_size.to_string());
+        worker_envs.insert("MASTER_ADDR", address.ip().to_string());
+        worker_envs.insert("MASTER_PORT", worker_port.to_string());
+
+        info!("Launching llm-worker (group_id = {group_id}, rank = {rank})...");
+        let worker = Command::new("llm-worker")
+            .args(worker_args)
+            .envs(worker_envs)
+            .spawn()?;
+
+        workers.push(worker);
+    }
+
+    let engine = Arc::new(
+        LLMEngineWrapper::new(
+            args.model_name,
+            args.block_size,
+            args.gpu_memory_fraction,
+            args.host_kv_cache_size,
+            args.max_batch_size,
+            args.max_seq_len,
+            args.max_num_batched_tokens,
+            args.tp_size,
+            worker_group_uds_path,
+        )
+        .await
+        .expect("Failed to start API Server"),
+    );
+
+    let llm_service = LLMService {
+        kind: args.kind,
+        engine: engine.clone(),
+    };
+
+    // Run the engine asynchronously in the background
+    let engine_clone = engine.clone();
+    tokio::spawn(
+        async move {
+            engine_clone.run_engine().await.unwrap();
+        }
+        .instrument(root_span.clone()),
+    );
+
+    let svc = LlmServer::new(llm_service);
+
+    debug!("LLMServer listening on: {address}");
+
+    Server::builder()
+        .add_service(svc)
+        .serve_with_shutdown(address, utils::signal_handler::wait_shutdown_signal())
+        .await?;
+
+    for mut worker in workers {
+        worker.wait()?;
+    }
+
+    Ok(())
+}

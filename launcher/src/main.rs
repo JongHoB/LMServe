@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::BufReader;
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 
@@ -11,9 +9,9 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::info;
 
-use api_server::args::APIServerArgs;
+use gateway::args::APIServerArgs;
 use launcher::args::{APIServerConfig, AppConfig, CLIArgs, LLMServerConfig};
-use llmserve::args::LLMEngineArgs;
+use llm_srv::args::LLMSrvArgs;
 
 fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
     let value = serde_json::to_value(args).expect("serialization failed");
@@ -42,11 +40,6 @@ fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
 }
 
 const LLMSERVE_BASE_PORT: u32 = 7000;
-
-const WORKER_GROUP_UDS_PATH_PREFIX: &str = "/tmp/llmserve/group";
-
-const MASTER_ADDR: &str = "localhost";
-const MASTER_PORT: u32 = 6000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -104,44 +97,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let model_name = config.model_name;
 
+    let mut device_offset: u8 = 0;
     let mut llm_servers: Vec<Child> = Vec::with_capacity(config.llm_servers.len() as usize);
-    let mut workers: Vec<Child> = Vec::new();
     for (group_id, llm_server) in config.llm_servers.iter().enumerate() {
-        for rank in 0..llm_server.tp_size {
-            let uds_path = format!(
-                "{}-{}/model-{}",
-                WORKER_GROUP_UDS_PATH_PREFIX, group_id, rank
-            );
-
-            std::fs::create_dir_all(Path::new(&uds_path).parent().unwrap())?;
-            if Path::new(&uds_path).exists() {
-                fs::remove_file(Path::new(&uds_path))
-                    .expect("Failed to remove existing UDS socket file");
-            }
-
-            let worker_args = vec![
-                model_name.clone(),
-                args.block_size.to_string(),
-                /*device=*/ workers.len().to_string(),
-                uds_path.to_string(),
-            ];
-
-            let mut worker_envs = HashMap::new();
-            worker_envs.insert("RANK", rank.to_string());
-            worker_envs.insert("WORLD_SIZE", llm_server.tp_size.to_string());
-            worker_envs.insert("MASTER_ADDR", MASTER_ADDR.to_string());
-            worker_envs.insert("MASTER_PORT", (MASTER_PORT + group_id as u32).to_string());
-
-            info!("Launching llmserve-worker (group_id = {group_id}, rank = {rank})...");
-            let worker = Command::new("llmserve-worker")
-                .args(worker_args)
-                .envs(worker_envs)
-                .spawn()?;
-
-            workers.push(worker);
-        }
-
-        let engine_args = LLMEngineArgs {
+        let devices: Vec<u8> = (device_offset..(device_offset + llm_server.tp_size)).collect();
+        let llm_srv_args = LLMSrvArgs {
             kind: llm_server.kind.clone(),
             model_name: model_name.clone(),
             block_size: llm_server.block_size,
@@ -152,19 +112,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_num_batched_tokens: llm_server.max_num_batched_tokens,
             tp_size: llm_server.tp_size,
             address: llm_server.address.clone(),
+            devices: Some(devices),
         };
 
-        let mut engine_envs = HashMap::new();
-        let worker_group_uds_path = format!("{}-{}", WORKER_GROUP_UDS_PATH_PREFIX, group_id);
-        engine_envs.insert("WORKER_GROUP_UDS_PATH", worker_group_uds_path.to_string());
-
-        info!("Launching llmserve (group_id = {group_id})...");
-        let engine = Command::new(bin_path.join("llmserve"))
-            .args(&to_cmd_args(&engine_args))
-            .envs(engine_envs)
+        info!("Launching llm_srv (group_id = {group_id})...");
+        let engine = Command::new(bin_path.join("llm_srv"))
+            .args(&to_cmd_args(&llm_srv_args))
             .spawn()?;
 
         llm_servers.push(engine);
+        device_offset += llm_server.tp_size;
     }
 
     let llm_server_addresses = config
@@ -186,9 +143,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     utils::signal_handler::wait_shutdown_signal().await;
 
-    for mut worker in workers {
-        worker.wait()?;
-    }
     for mut llm_server in llm_servers {
         llm_server.wait()?;
     }
