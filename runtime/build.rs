@@ -11,8 +11,8 @@ fn main() {
         .out_dir("src/pb")
         .include_file("mod.rs")
         .compile_protos(
-            &["../../proto/worker.proto", "../../proto/llm.proto"],
-            &["../../proto"],
+            &["../proto/worker.proto", "../proto/llm.proto"],
+            &["../proto"],
         )
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
 }

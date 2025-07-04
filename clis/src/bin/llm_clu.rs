@@ -9,9 +9,9 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::info;
 
-use gateway::args::APIServerArgs;
-use launcher::args::{APIServerConfig, AppConfig, CLIArgs, LLMServerConfig};
-use llm_srv::args::LLMSrvArgs;
+use clis::args::APIServerArgs;
+use clis::args::LLMSrvArgs;
+use clis::args::{APIServerConfig, AppConfig, CLIArgs, LLMServerConfig};
 
 fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
     let value = serde_json::to_value(args).expect("serialization failed");

@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use ahash::AHasher;
 use tracing::warn;
 
-use crate::sequence::Sequence;
+use super::sequence::Sequence;
 use utils::collections::FifoSet;
 
 #[derive(PartialEq, Eq, Debug)]

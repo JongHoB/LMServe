@@ -19,6 +19,63 @@ default_fn!(default_tp_size, u8, 1);
 
 #[derive(Parser, Debug, Serialize)]
 #[command(author, version, about)]
+pub struct LLMSrvArgs {
+    #[arg(long, default_value = "all")]
+    pub kind: String,
+
+    #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
+    pub model_name: String,
+
+    #[arg(long, default_value_t = 8)]
+    pub block_size: usize,
+
+    /// Fraction of total GPU memory to use (0.0 ~ 1.0)
+    #[arg(long, default_value_t = 0.9)]
+    pub gpu_memory_fraction: f32,
+
+    // Host-side KV cache size in GB
+    #[arg(long, default_value_t = 16)]
+    pub host_kv_cache_size: usize,
+
+    #[arg(long, default_value_t = 256)]
+    pub max_batch_size: usize,
+
+    #[arg(long, default_value_t = 4096)]
+    pub max_seq_len: usize,
+
+    #[arg(long, default_value_t = 5120)]
+    pub max_num_batched_tokens: usize,
+
+    #[arg(long, default_value_t = 1)]
+    pub tp_size: u8,
+
+    #[arg(long, default_value = "127.0.0.1:7000")]
+    pub address: String,
+
+    #[arg(long, value_delimiter = ' ')]
+    pub devices: Option<Vec<u8>>,
+}
+
+#[derive(Parser, Debug, Serialize, Deserialize)]
+#[command(author, version, about)]
+pub struct APIServerArgs {
+    #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
+    pub model_name: String,
+
+    #[arg(long, default_value = "127.0.0.1:8000")]
+    pub address: String,
+
+    #[arg(
+        long,
+        value_delimiter = ' ',
+        num_args = 1..,
+        default_values_t = vec!["127.0.0.1:7000".to_string()]
+    )]
+    pub llm_server_addresses: Vec<String>,
+}
+
+#[derive(Parser, Debug, Serialize)]
+#[command(author, version, about)]
 pub struct CLIArgs {
     #[arg(long)]
     pub config: Option<String>,

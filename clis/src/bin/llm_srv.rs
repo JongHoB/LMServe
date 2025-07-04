@@ -14,13 +14,15 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info};
 use tracing_futures::Instrument;
 
-use llm_engine::engine::LLMEngineWrapper;
-use llm_srv::args::LLMSrvArgs;
-use llm_srv::pb::llm::llm_server::{Llm, LlmServer};
-use llm_srv::pb::llm::{
+use runtime::llm_engine::engine::LLMEngineWrapper;
+
+use clis::pb::llm::llm_server::{Llm, LlmServer};
+use clis::pb::llm::{
     GenerateRequest, GenerateResponse, GetDescriptorsRequest, GetDescriptorsResponse,
     GetKindResponse, GetKvAgentMetadataResponse,
 };
+
+use clis::args::LLMSrvArgs;
 
 const WORKER_GROUP_UDS_PATH_PREFIX: &str = "/tmp/llmserve/group";
 

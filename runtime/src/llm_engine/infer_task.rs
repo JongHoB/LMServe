@@ -1,5 +1,6 @@
 pub use crate::pb::worker::{InferInput, InferOutput};
-use crate::sequence::{SeqStatus, Sequence};
+
+use super::sequence::{SeqStatus, Sequence};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum InferTaskStatus {

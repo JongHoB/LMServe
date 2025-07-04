@@ -24,7 +24,7 @@ $ export LLMSERVE_HOME=/path/to/LLMServe
 
 Then, launch the server with:
 ```bash
-$ bin/launcher --config configs/default.yaml
+$ bin/llm_clu --config configs/default.yaml
 ```
 
 ### Running Benchmark

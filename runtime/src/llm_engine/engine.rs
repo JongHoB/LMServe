@@ -6,11 +6,11 @@ use tokio::join;
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
 
-use crate::infer_task::InferTask;
-use crate::scheduler::Scheduler;
-use crate::sequence::{SeqStatus, Sequence};
-use crate::stub::LLMEngineStub;
-use crate::worker::{KVWorkerGroup, ModelWorkerGroup};
+use super::infer_task::InferTask;
+use super::scheduler::Scheduler;
+use super::sequence::{SeqStatus, Sequence};
+use super::stub::LLMEngineStub;
+use super::worker::{KVWorkerGroup, ModelWorkerGroup};
 
 pub fn norm_log_probs(probs: &[f32]) -> f32 {
     let log_sum: f32 = probs

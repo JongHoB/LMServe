@@ -1,7 +1,7 @@
 BIN_DIR    := bin
 TARGET_DIR := target/release
-PACKAGES   := llm_srv llm_engine gateway launcher
-BINARIES   := llm_srv api_server launcher
+PACKAGES   := runtime clis
+BINARIES   := llm_srv api_server llm_clu
 
 .PHONY: all build copy-bins clean
 

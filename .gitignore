@@ -1,5 +1,7 @@
 target
-bin
+/bin
+!src/bin/
+!src/bin/**
 
 *.swp
 tags

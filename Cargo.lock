@@ -302,6 +302,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
+name = "clis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "futures",
+ "prost",
+ "rand 0.9.1",
+ "runtime",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokenizers",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-futures",
+ "tracing-subscriber",
+ "utils",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -644,27 +670,6 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
-]
-
-[[package]]
-name = "gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "clap",
- "prost",
- "serde",
- "tokenizers",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-build",
- "tracing",
- "tracing-subscriber",
- "utils",
- "uuid",
 ]
 
 [[package]]
@@ -1066,23 +1071,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "launcher"
-version = "0.1.0"
-dependencies = [
- "clap",
- "gateway",
- "llm_srv",
- "prost",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "utils",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1115,45 +1103,6 @@ name = "litemap"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "241eaef5fd12c88705a01fc1066c48c4b36e0dd4377dcdc7ec3942cea7a69956"
-
-[[package]]
-name = "llm_engine"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "anyhow",
- "axum",
- "futures",
- "prost",
- "serde",
- "tokio",
- "tonic",
- "tonic-build",
- "tracing",
- "tracing-subscriber",
- "utils",
-]
-
-[[package]]
-name = "llm_srv"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "futures",
- "llm_engine",
- "prost",
- "rand 0.9.1",
- "serde",
- "tokio",
- "tonic",
- "tonic-build",
- "tracing",
- "tracing-futures",
- "tracing-subscriber",
- "utils",
-]
 
 [[package]]
 name = "lock_api"
@@ -1777,6 +1726,26 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "futures",
+ "prost",
+ "serde",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+ "utils",
 ]
 
 [[package]]

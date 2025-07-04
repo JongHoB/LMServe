@@ -8,13 +8,14 @@ use tonic::transport::Channel;
 
 use tracing::debug;
 
-use crate::infer_task::{InferInput, InferOutput};
 use crate::pb::worker::kv_worker_client::KvWorkerClient;
 use crate::pb::worker::worker_client::WorkerClient;
 use crate::pb::worker::{
     AgentMetadata, BlockMapping, GetDescriptorsRequest, InferRequest, InitCacheRequest,
     KvTransferRequest, PullKvRequest, WarmupRequest,
 };
+
+use super::infer_task::{InferInput, InferOutput};
 
 type Bytes = Vec<u8>;
 

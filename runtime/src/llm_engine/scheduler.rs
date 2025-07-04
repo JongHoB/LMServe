@@ -2,11 +2,12 @@ use std::collections::{HashMap, VecDeque};
 
 use tracing::info;
 
-use crate::block_manager::BlockManager;
-use crate::infer_task::{InferInput, InferOutput, InferTask};
 use crate::pb::worker::{BlockMapping, BlockMappingEntry};
-use crate::sequence::SeqStatus;
-use crate::sequence::Sequence;
+
+use super::block_manager::BlockManager;
+use super::infer_task::{InferInput, InferOutput, InferTask};
+use super::sequence::SeqStatus;
+use super::sequence::Sequence;
 
 struct BatchEntry {
     pub context_len: usize,

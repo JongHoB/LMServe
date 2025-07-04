@@ -2,10 +2,8 @@
 resolver = "2"
 members = [
     "utils",
-    "runtime/llm_engine",
-    "runtime/llm_srv",
-    "gateway",
-    "launcher"
+    "runtime",
+    "clis",
 ]
 
 [workspace.package]
@@ -15,10 +13,7 @@ edition = "2024"
 
 [workspace.dependencies]
 utils = { path = "utils" }
-llm_engine = { path = "runtime/llm_engine" }
-llm_srv = { path = "runtime/llm_srv" }
-gateway = { path = "gateway" }
-launcher = { path = "launcher" }
+runtime = { path = "runtime"}
 
 anyhow = "1.0.98"
 tonic = "0.13"
