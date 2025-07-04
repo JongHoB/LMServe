@@ -9,9 +9,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::info;
 
-use clis::args::APIServerArgs;
-use clis::args::LLMSrvArgs;
-use clis::args::{APIServerConfig, AppConfig, CLIArgs, LLMServerConfig};
+use clis::args::{APIServerArgs, CLIArgs, LLMSrvArgs};
+use clis::configs::{APIServerConfig, LLMCluConfig, LLMSrvConfig};
 
 fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
     let value = serde_json::to_value(args).expect("serialization failed");
@@ -57,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = CLIArgs::parse();
 
-    let config: AppConfig = match args.config {
+    let config: LLMCluConfig = match args.config {
         Some(config) => {
             let file = fs::File::open(config)?;
             let reader = BufReader::new(file);
@@ -73,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|i| {
                     let port = LLMSERVE_BASE_PORT + i;
 
-                    LLMServerConfig {
+                    LLMSrvConfig {
                         kind: "full".to_string(),
                         block_size: args.block_size,
                         gpu_memory_fraction: args.gpu_memory_fraction,
@@ -87,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
 
-            AppConfig {
+            LLMCluConfig {
                 model_name: args.model_name,
                 api_server: api_server_config,
                 llm_servers: llm_server_configs,
