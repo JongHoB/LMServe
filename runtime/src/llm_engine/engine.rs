@@ -358,7 +358,7 @@ pub struct LLMEngineOutput {
 
 impl LLMEngineOutput {
     pub fn from_task(task: &InferTask) -> Self {
-        let seqs = task.get_seqs(SeqStatus::FINISHED);
+        let seqs = task.get_seqs(SeqStatus::Finished);
         let selected_seq = seqs
             .iter()
             .max_by(|a, b| {

@@ -4,29 +4,25 @@ use super::sequence::{SeqStatus, Sequence};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum InferTaskStatus {
-    WAITING,
-    DECODE,
-    PREFILL,
+    Waiting,
+    Decode,
+    Prefill,
 }
 
-#[allow(dead_code)]
 pub struct InferTask {
     session_id: String,
     seqs: Vec<Sequence>,
     status: InferTaskStatus,
     arrival_time: u64,
-    num_samples: u16,
 }
 
 impl InferTask {
     pub fn new(session_id: String, seqs: Vec<Sequence>, arrival_time: u64) -> InferTask {
-        let num_samples = seqs.len() as u16;
         InferTask {
             session_id,
             seqs,
-            status: InferTaskStatus::WAITING,
+            status: InferTaskStatus::Waiting,
             arrival_time,
-            num_samples,
         }
     }
 
@@ -65,11 +61,11 @@ impl InferTask {
     }
 
     pub fn set_prefill(&mut self) {
-        self.status = InferTaskStatus::PREFILL;
+        self.status = InferTaskStatus::Prefill;
     }
 
     pub fn set_decode(&mut self) {
-        self.status = InferTaskStatus::DECODE;
+        self.status = InferTaskStatus::Decode;
     }
 
     pub fn is_finished(&mut self) -> bool {

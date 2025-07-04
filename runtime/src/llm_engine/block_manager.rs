@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use ahash::AHasher;
@@ -62,32 +61,7 @@ impl Block {
     }
 }
 
-#[derive(Debug)]
-pub enum BlockAllocError {
-    NotEnoughBlocks,
-    EmptyTokenIds { seq_id: u64 },
-    NotFoundBlockTable { seq_id: u64 },
-}
-
-impl fmt::Display for BlockAllocError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BlockAllocError::NotEnoughBlocks => write!(f, "Not enough blocks available"),
-            BlockAllocError::EmptyTokenIds { seq_id } => {
-                write!(f, "token_ids is empty for seq_id {}", seq_id)
-            }
-            BlockAllocError::NotFoundBlockTable { seq_id } => {
-                write!(f, "Not found block table for seq_id {}", seq_id)
-            }
-        }
-    }
-}
-
-impl std::error::Error for BlockAllocError {}
-
-#[allow(dead_code)]
 struct BlockAllocator {
-    block_size: usize,
     num_total_blocks: usize,
     block_pool: Vec<Block>,
     free_block_ids: FifoSet<u32>,
@@ -102,7 +76,6 @@ impl BlockAllocator {
         let free_block_ids: FifoSet<u32> = block_pool.iter().map(|b| b.id).collect();
 
         Self {
-            block_size,
             num_total_blocks: num_blocks,
             block_pool,
             free_block_ids,
@@ -234,12 +207,6 @@ impl BlockManager {
             block_allocator,
             seq_block_buffer: HashMap::new(),
         }
-    }
-
-    pub fn get_block_ids(&self, seq: &Sequence) -> Vec<u32> {
-        self.seq_block_mapping_table
-            .get(&seq.seq_id)
-            .map_or(Vec::new(), |block_map| block_map.block_ids.clone())
     }
 
     pub fn get_block_ids_range(&self, seq_id: u64, start: usize, end: usize) -> (Vec<u32>, usize) {

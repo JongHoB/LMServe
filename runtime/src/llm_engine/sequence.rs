@@ -1,15 +1,15 @@
 #[derive(PartialEq, Eq)]
 pub enum SeqStatus {
-    WAITING,
-    ALLOCATED,
-    FINISHED,
-    CANCELLED,
+    Waiting,
+    Allocated,
+    Finished,
+    Canceled,
 }
 
 #[derive(PartialEq, Eq)]
 pub enum StopReason {
-    EOS,
-    MAXLENGTH,
+    Eos,
+    MaxLength,
 }
 
 #[allow(dead_code)]
@@ -52,7 +52,7 @@ impl Sequence {
             session_id,
             token_ids,
             max_output_len,
-            status: SeqStatus::WAITING,
+            status: SeqStatus::Waiting,
             stop_reason: None,
             prompt_len,
             output_len: 0,
@@ -66,11 +66,11 @@ impl Sequence {
     }
 
     pub fn is_active(&self) -> bool {
-        matches!(self.status, SeqStatus::WAITING | SeqStatus::ALLOCATED)
+        matches!(self.status, SeqStatus::Waiting | SeqStatus::Allocated)
     }
 
     pub fn is_finished(&self) -> bool {
-        matches!(self.status, SeqStatus::FINISHED | SeqStatus::CANCELLED)
+        matches!(self.status, SeqStatus::Finished | SeqStatus::Canceled)
     }
 
     pub fn get_token_ids(&self) -> &[u32] {

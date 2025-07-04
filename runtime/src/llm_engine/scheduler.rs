@@ -77,7 +77,7 @@ impl Scheduler {
                 self.gpu_block_manager.init_prefix_cache_blocks(seq);
 
                 self.gpu_block_manager.reserve_blocks(seq);
-                seq.status = SeqStatus::ALLOCATED;
+                seq.status = SeqStatus::Allocated;
                 num_alloc_seqs += 1;
             } else {
                 break;
@@ -93,7 +93,7 @@ impl Scheduler {
         for seq in seqs {
             if self.gpu_block_manager.can_alloc_seq(seq, watermark) {
                 self.gpu_block_manager.reserve_blocks(seq);
-                seq.status = SeqStatus::ALLOCATED;
+                seq.status = SeqStatus::Allocated;
                 num_alloc_seqs += 1;
             } else {
                 break;
@@ -135,7 +135,7 @@ impl Scheduler {
         let seqs = infer_task.get_active_seqs_mut();
         for seq in seqs {
             self.gpu_block_manager.free(seq.seq_id);
-            seq.status = SeqStatus::WAITING;
+            seq.status = SeqStatus::Waiting;
         }
     }
 
@@ -154,7 +154,7 @@ impl Scheduler {
 
         let mut token_budget = self.max_num_batched_tokens;
         'outer: for infer_task in self.allocated.iter() {
-            for seq in infer_task.get_seqs(SeqStatus::ALLOCATED) {
+            for seq in infer_task.get_seqs(SeqStatus::Allocated) {
                 if running_batch.len() >= self.max_batch_size || token_budget == 0 {
                     break 'outer;
                 }
@@ -281,7 +281,7 @@ impl Scheduler {
         while let Some(mut infer_task) = self.allocated.pop_front() {
             if self.try_extend_infer_task(&mut infer_task, 1.0) {
                 for seq in infer_task.get_active_seqs_mut() {
-                    seq.status = SeqStatus::ALLOCATED;
+                    seq.status = SeqStatus::Allocated;
                 }
                 self.try_extend_host_infer_task(&infer_task);
 
@@ -301,7 +301,7 @@ impl Scheduler {
         while let Some(mut infer_task) = self.waiting.pop_front() {
             if self.try_reserve_infer_task(&mut infer_task, self.watermark_blocks) {
                 for seq in infer_task.get_active_seqs_mut() {
-                    seq.status = SeqStatus::ALLOCATED;
+                    seq.status = SeqStatus::Allocated;
                 }
                 self.try_extend_host_infer_task(&infer_task);
 
@@ -346,7 +346,7 @@ impl Scheduler {
         let now = utils::time::now_ns();
 
         for mut task in self.allocated.drain(..) {
-            for seq in task.get_seqs_mut(SeqStatus::ALLOCATED) {
+            for seq in task.get_seqs_mut(SeqStatus::Allocated) {
                 let (output, entry) = match (
                     infer_outputs.get(&seq.seq_id),
                     self.running_batch.get(&seq.seq_id),
@@ -372,10 +372,11 @@ impl Scheduler {
                     now,
                 );
 
-                let reached_max_len = seq.max_output_len.is_some_and(|max| seq.output_len >= max);
+                let reached_max_len = seq.max_output_len.is_some_and(|max| seq.output_len >= max)
+                    || seq.token_ids.len() >= self.max_seq_len;
 
                 if (!seq.ignore_eos && output.is_eos) || reached_max_len {
-                    seq.status = SeqStatus::FINISHED;
+                    seq.status = SeqStatus::Finished;
                 }
             }
 
@@ -412,7 +413,7 @@ impl Scheduler {
     }
 
     fn remove_task(&mut self, infer_task: &InferTask) {
-        for seq in infer_task.get_seqs(SeqStatus::FINISHED) {
+        for seq in infer_task.get_seqs(SeqStatus::Finished) {
             self.gpu_block_manager.free(seq.seq_id);
             self.host_block_manager.free(seq.seq_id);
         }
