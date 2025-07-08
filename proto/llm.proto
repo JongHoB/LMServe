@@ -7,11 +7,17 @@ package LLM;
 service LLM {
   rpc get_kind(google.protobuf.Empty) returns (GetKindResponse);
 
+  rpc get_kv_agent_metadata(google.protobuf.Empty) returns (KVAgentMetadata);
+
+  rpc add_remote_kv_agent(KVAgentMetadata) returns (google.protobuf.Empty);
+
   rpc generate(GenerateRequest) returns (GenerateResponse);
 
-  rpc get_kv_agent_metadata(google.protobuf.Empty) returns (GetKVAgentMetadataResponse);
+  rpc reserve(ReserveRequest)  returns (ReserveResponse);
 
-  rpc get_descriptors(GetDescriptorsRequest) returns (GetDescriptorsResponse);
+  rpc transfer_kv(TransferKVRequest)  returns (TransferKVResponse);
+
+  rpc trigger(TriggerRequest)  returns (GenerateResponse);
 }
 
 message GetKindResponse {
@@ -24,7 +30,6 @@ message GenerateRequest {
   uint32 num_samples = 3;
   optional uint64 max_output_len = 4;
   bool ignore_eos = 5;
-  optional string server_url = 6;
 }
 
 message GenerateResponse {
@@ -33,15 +38,40 @@ message GenerateResponse {
   repeated float token_latencies = 3;
 }
 
-message GetKVAgentMetadataResponse { repeated bytes metadata = 1; }
-
-message GetDescriptorsRequest {
-  repeated uint32 token_ids = 1;
-  uint64 start = 2;
-  uint64 end = 3;
+message ReserveRequest {
+  string session_id = 1;
+  repeated uint32 input_ids = 2;
+  uint32 num_samples = 3;
+  optional uint64 max_output_len = 4;
+  bool ignore_eos = 5;
 }
 
-message GetDescriptorsResponse {
-  repeated bytes descs = 1;
-  uint64 last_token_idx = 2;
+message ReserveResponse {
+  repeated bytes kv_descs = 1;
+  repeated uint64 hash_values = 2;
+}
+
+message TransferKVRequest {
+  string session_id = 1;
+  repeated string peer_names = 2;
+  repeated bytes kv_descs = 3;
+  repeated uint64 hash_values = 4;
+}
+
+message TransferKVResponse {
+  repeated uint64 success_hashes = 1;
+}
+
+message TriggerRequest {
+  string session_id = 1;
+  repeated uint64 hash_values = 2;
+}
+
+message AgentMetadata {
+  string agent_name = 1;
+  bytes data = 2;
+}
+
+message KVAgentMetadata {
+  repeated AgentMetadata agents = 1;
 }

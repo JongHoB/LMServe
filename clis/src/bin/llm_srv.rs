@@ -18,8 +18,8 @@ use runtime::llm_engine::engine::LLMEngineWrapper;
 
 use clis::pb::llm::llm_server::{Llm, LlmServer};
 use clis::pb::llm::{
-    GenerateRequest, GenerateResponse, GetDescriptorsRequest, GetDescriptorsResponse,
-    GetKindResponse, GetKvAgentMetadataResponse,
+    AgentMetadata, GenerateRequest, GenerateResponse, GetKindResponse, KvAgentMetadata,
+    ReserveRequest, ReserveResponse, TransferKvRequest, TransferKvResponse, TriggerRequest,
 };
 
 use clis::args::LLMSrvArgs;
@@ -40,6 +40,24 @@ impl Llm for LLMService {
         }))
     }
 
+    async fn add_remote_kv_agent(
+        &self,
+        request: Request<KvAgentMetadata>,
+    ) -> Result<Response<()>, Status> {
+        let agents = request.into_inner().agents;
+        let kv_agent_metadata = agents
+            .into_iter()
+            .map(|agent| (agent.agent_name, agent.data))
+            .collect();
+
+        self.engine
+            .add_remote_agent(kv_agent_metadata)
+            .await
+            .expect("Failed to add remote kv agent");
+
+        Ok(Response::new(()))
+    }
+
     async fn generate(
         &self,
         request: Request<GenerateRequest>,
@@ -51,7 +69,6 @@ impl Llm for LLMService {
         let num_samples = generate_request.num_samples;
         let max_output_len = generate_request.max_output_len;
         let ignore_eos = generate_request.ignore_eos;
-        let server_url = generate_request.server_url;
 
         let output = self
             .engine
@@ -61,10 +78,83 @@ impl Llm for LLMService {
                 session_id,
                 max_output_len.map(|x| x as usize),
                 ignore_eos,
-                server_url,
             )
             .await
             .expect("Failed to generate");
+
+        Ok(Response::new(GenerateResponse {
+            session_id: output.session_id,
+            output_ids: output.output_ids,
+            token_latencies: output.token_latencies,
+        }))
+    }
+
+    async fn reserve(
+        &self,
+        request: Request<ReserveRequest>,
+    ) -> Result<Response<ReserveResponse>, Status> {
+        let reserve_request = request.into_inner();
+
+        let session_id = reserve_request.session_id;
+        let input_ids = reserve_request.input_ids;
+        let num_samples = reserve_request.num_samples;
+        let max_output_len = reserve_request.max_output_len;
+        let ignore_eos = reserve_request.ignore_eos;
+
+        let output = self
+            .engine
+            .reserve(
+                input_ids,
+                num_samples as u16,
+                session_id,
+                max_output_len.map(|x| x as usize),
+                ignore_eos,
+            )
+            .await
+            .expect("Failed to reserve request");
+
+        return Ok(Response::new(ReserveResponse {
+            hash_values: output.hash_values,
+            kv_descs: output.kv_descs,
+        }));
+    }
+
+    async fn transfer_kv(
+        &self,
+        request: Request<TransferKvRequest>,
+    ) -> Result<Response<TransferKvResponse>, Status> {
+        let transfer_request = request.into_inner();
+
+        let session_id = transfer_request.session_id;
+        let peer_names = transfer_request.peer_names;
+        let kv_descs = transfer_request.kv_descs;
+        let hash_values = transfer_request.hash_values;
+
+        let output = self
+            .engine
+            .transfer_kv(session_id, peer_names, kv_descs, hash_values)
+            .await
+            .expect("Failed to transfer KV");
+
+        Ok(Response::new(TransferKvResponse {
+            success_hashes: output.hash_values,
+        }))
+    }
+
+    async fn trigger(
+        &self,
+        request: Request<TriggerRequest>,
+    ) -> Result<Response<GenerateResponse>, Status> {
+        let trigger_request = request.into_inner();
+
+        let session_id = trigger_request.session_id;
+        let hash_values = trigger_request.hash_values;
+
+        let output = self
+            .engine
+            .trigger(session_id, hash_values)
+            .await
+            .expect("Failed to trigger");
 
         Ok(Response::new(GenerateResponse {
             session_id: output.session_id,
@@ -77,38 +167,20 @@ impl Llm for LLMService {
     async fn get_kv_agent_metadata(
         &self,
         request: Request<()>,
-    ) -> Result<Response<GetKvAgentMetadataResponse>, Status> {
+    ) -> Result<Response<KvAgentMetadata>, Status> {
         let local_agent_metadata = self
             .engine
             .get_kv_agent_metadata()
             .await
             .expect("Failed to get KV agent metadat");
 
-        Ok(Response::new(GetKvAgentMetadataResponse {
-            metadata: local_agent_metadata,
-        }))
-    }
+        // FIXME(jinu)
+        let agents = local_agent_metadata
+            .into_iter()
+            .map(|(agent_name, data)| AgentMetadata { agent_name, data })
+            .collect();
 
-    async fn get_descriptors(
-        &self,
-        request: Request<GetDescriptorsRequest>,
-    ) -> Result<Response<GetDescriptorsResponse>, Status> {
-        let get_desc_request = request.into_inner();
-
-        let token_ids = get_desc_request.token_ids;
-        let start = get_desc_request.start;
-        let end = get_desc_request.end;
-
-        let (descs, last_token_idx) = self
-            .engine
-            .get_descriptors(token_ids, start as usize, end as usize)
-            .await
-            .expect("Failed to get descriptors");
-
-        Ok(Response::new(GetDescriptorsResponse {
-            descs,
-            last_token_idx: last_token_idx as u64,
-        }))
+        Ok(Response::new(KvAgentMetadata { agents }))
     }
 }
 

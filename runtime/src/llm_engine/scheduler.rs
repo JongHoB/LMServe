@@ -24,6 +24,8 @@ pub struct Scheduler {
     watermark_blocks: f32,
     waiting: VecDeque<InferTask>,
     allocated: VecDeque<InferTask>,
+    // HashMap<session_id>, infer_task>
+    pendding: HashMap<String, InferTask>,
 
     running_batch: HashMap<u64, BatchEntry>,
 
@@ -48,6 +50,7 @@ impl Scheduler {
             watermark_blocks: 0.97,
             waiting: VecDeque::new(),
             allocated: VecDeque::new(),
+            pendding: HashMap::new(),
             running_batch: HashMap::new(),
             last_log_time: 0,
         }
@@ -60,6 +63,27 @@ impl Scheduler {
         }
 
         self.waiting.push_back(infer_task);
+    }
+
+    pub fn pend(&mut self, infer_task: InferTask) {
+        let old = self
+            .pendding
+            .insert(infer_task.get_session_id(), infer_task);
+        if old.is_some() {
+            panic!("A duplicate session id is already pending");
+        }
+    }
+
+    pub fn trigger_pend_task(&mut self, session_id: String) {
+        let infer_task = self
+            .pendding
+            .remove(&session_id)
+            .unwrap_or_else(|| panic!("no pending task found for session_id: {}", session_id));
+
+        let head_seq = infer_task.get_head_seq().expect("No active sequence found");
+        self.host_block_manager.update_prefix_cache_blocks(head_seq);
+
+        self.add(infer_task);
     }
 
     fn try_reserve_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
@@ -122,13 +146,24 @@ impl Scheduler {
         self.host_block_manager.init_prefix_cache_blocks(seq)
     }
 
-    pub fn hold_seq_tokens(&mut self, seq: &Sequence, start: usize, end: usize) -> Vec<u32> {
+    pub fn reserve_buffer(
+        &mut self,
+        session_id: &str,
+        token_ids: &[u32],
+        start: usize,
+    ) -> (Vec<u32>, Vec<u64>) {
         self.host_block_manager
-            .hold_seq_tokens(seq.seq_id, &seq.token_ids, start, end)
+            .reserve_buffer_by_tokens(session_id, token_ids, start)
     }
 
-    pub fn release_seq_tokens(&mut self, seq: &Sequence) {
-        self.host_block_manager.release_seq_tokens(seq.seq_id);
+    pub fn pin_buffer(&mut self, session_id: &str, hash_values: &[u64]) -> Vec<u32> {
+        self.host_block_manager
+            .pin_buffer_by_hashes(session_id, hash_values)
+    }
+
+    pub fn release_buffer(&mut self, session_id: &str, hash_values: &[u64]) {
+        self.host_block_manager
+            .release_buffer(session_id, hash_values);
     }
 
     fn preempt_infer_task(&mut self, infer_task: &mut InferTask) {
@@ -395,21 +430,6 @@ impl Scheduler {
         self.running_batch.clear();
 
         finished_tasks
-    }
-
-    pub fn get_host_cache_block_range(
-        &self,
-        token_ids: Vec<u32>,
-        start: usize,
-        end: usize,
-    ) -> (Vec<u32>, usize) {
-        self.host_block_manager
-            .get_prefix_cache_blocks_range(&token_ids, start, end)
-    }
-
-    pub fn get_host_cache_token_len(&self, token_ids: &[u32]) -> usize {
-        self.host_block_manager
-            .get_prefix_cache_token_len(token_ids)
     }
 
     fn remove_task(&mut self, infer_task: &InferTask) {

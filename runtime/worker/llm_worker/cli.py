@@ -27,6 +27,8 @@ from llm_worker.pb.worker_pb2 import (
     AddRemoteAgentMetadataResponse,
     GetDescriptorsRequest,
     GetDescriptorsResponse,
+    PushKVRequest,
+    PushKVResponse,
     PullKVRequest,
     PullKVResponse,
 )
@@ -141,7 +143,8 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
         request: Empty,
         context: grpc.aio.ServicerContext,
     ) -> AgentMetadata:
-        return AgentMetadata(data=self.worker.kv_agent_metadata)
+        return AgentMetadata(agent_name=self.worker.kv_agent_name,
+                             data=self.worker.kv_agent_metadata)
 
     async def AddRemoteAgentMetadata(
         self,
@@ -167,13 +170,30 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
 
         return GetDescriptorsResponse(descs=descs)
 
+    async def PushKV(
+        self,
+        request: PushKVRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> PushKVResponse:
+        peer_name = request.peer_name
+        descs = request.kv_descs
+        block_ids = request.block_ids
+
+        ret = await self.worker.push_kv(
+            peer_name,
+            descs,
+            block_ids,
+        )
+
+        return PushKVResponse(success=ret)
+
     async def PullKV(
         self,
         request: PullKVRequest,
         context: grpc.aio.ServicerContext,
     ) -> PullKVResponse:
         peer_name = request.peer_name
-        descs = request.descs
+        descs = request.kv_descs
         block_ids = request.block_ids
 
         ret = await self.worker.pull_kv(

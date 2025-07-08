@@ -106,12 +106,12 @@ class KVWorker:
         kv_agent = nixl_agent(name)
         reg_desc = kv_agent.register_memory(
             self.host_kv_caches_tensor,
-            is_sorted=True,
         )
         if not reg_desc:
             raise RuntimeError("KV memory registration failed")
 
         self.reg_desc = reg_desc
+        self.kv_agent_name = name
         self.kv_agent_metadata = kv_agent.get_agent_metadata()
         self.kv_agent = kv_agent
         self.thread_pool = ThreadPoolExecutor(max_workers=thread_pool_size)
@@ -205,10 +205,52 @@ class KVWorker:
             self.host_kv_caches_tensor[block_id] for block_id in block_ids
         ]
 
-        xfer_desc = self.kv_agent.get_xfer_descs(tensors, is_sorted=True)
+        xfer_desc = self.kv_agent.get_xfer_descs(tensors)
         descs = self.kv_agent.get_serialized_descs(xfer_desc)
 
         return descs
+
+    async def push_kv(
+        self,
+        peer_name: str,
+        remote_descs: bytes,
+        block_ids: List[int],
+    ) -> None:
+        tensors = [self.host_kv_caches_tensor[bid] for bid in block_ids]
+
+        local_descs = self.kv_agent.get_xfer_descs(tensors)
+        remote_descs = self.kv_agent.deserialize_descs(remote_descs)
+
+        while remote_descs.descCount() > len(block_ids):
+            remote_descs.remDesc(remote_descs.descCount() - 1)
+
+        xfer_handle = self.kv_agent.initialize_xfer(
+            "WRITE",
+            local_descs,
+            remote_descs,
+            peer_name,
+            b'',
+        )
+        if not xfer_handle:
+            print("Creating transfer failed.")
+            return False
+
+        state = self.kv_agent.transfer(xfer_handle)
+        if state == "ERR":
+            print("Posting transfer failed.")
+            return False
+
+        while True:
+            state = self.kv_agent.check_xfer_state(xfer_handle)
+            if state == "ERR":
+                print("Transfer Error.")
+                return False
+            elif state == "DONE":
+                break
+            else:
+                await asyncio.sleep(1e-5)
+
+        return True
 
     async def pull_kv(
         self,
@@ -218,7 +260,7 @@ class KVWorker:
     ) -> None:
         tensors = [self.host_kv_caches_tensor[bid] for bid in block_ids]
 
-        local_descs = self.kv_agent.get_xfer_descs(tensors, is_sorted=True)
+        local_descs = self.kv_agent.get_xfer_descs(tensors)
         remote_descs = self.kv_agent.deserialize_descs(remote_descs)
 
         xfer_handle = self.kv_agent.initialize_xfer(

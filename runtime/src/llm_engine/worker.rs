@@ -12,7 +12,7 @@ use crate::pb::worker::kv_worker_client::KvWorkerClient;
 use crate::pb::worker::worker_client::WorkerClient;
 use crate::pb::worker::{
     AgentMetadata, BlockMapping, GetDescriptorsRequest, InferRequest, InitCacheRequest,
-    KvTransferRequest, PullKvRequest, WarmupRequest,
+    KvTransferRequest, PullKvRequest, PushKvRequest, WarmupRequest,
 };
 
 use super::infer_task::{InferInput, InferOutput};
@@ -107,15 +107,18 @@ impl KVWorker {
         Ok(())
     }
 
-    async fn get_local_agent_metadata(&self) -> Result<Vec<u8>> {
+    async fn get_local_agent_metadata(&self) -> Result<(String, Vec<u8>)> {
         let response = self
             .client
             .lock()
             .await
             .get_local_agent_metadata(())
             .await?;
-        let metadata = response.into_inner().data;
-        Ok(metadata)
+
+        let response = response.into_inner();
+        let agent_name = response.agent_name;
+        let metadata = response.data;
+        Ok((agent_name, metadata))
     }
 
     async fn add_remote_agent_metadata(&self, request: AgentMetadata) -> Result<String> {
@@ -140,6 +143,18 @@ impl KVWorker {
 
         let descs = response.descs;
         Ok(descs)
+    }
+
+    async fn push_kv(&self, request: PushKvRequest) -> Result<bool> {
+        let response = self
+            .client
+            .lock()
+            .await
+            .push_kv(request)
+            .await?
+            .into_inner();
+
+        Ok(response.success)
     }
 
     async fn pull_kv(&self, request: PullKvRequest) -> Result<bool> {
@@ -402,23 +417,23 @@ impl KVWorkerGroup {
         Ok(())
     }
 
-    pub async fn get_local_agent_metadata(&self) -> Result<Vec<Vec<u8>>> {
-        let metadata: Vec<Vec<u8>> = self
+    pub async fn get_local_agent_metadata(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let outputs = self
             .run_workers_gather((), move |worker, _| async move {
                 worker.get_local_agent_metadata().await
             })
             .await?;
 
-        Ok(metadata)
+        Ok(outputs)
     }
 
     pub async fn add_remote_agent_metadata(
         &self,
-        agent_metadata: Vec<Vec<u8>>,
+        agent_metadata: Vec<(String, Vec<u8>)>,
     ) -> Result<Vec<String>> {
         let mut requests: Vec<_> = Vec::with_capacity(self.workers.len());
-        for md in agent_metadata {
-            requests.push(AgentMetadata { data: md })
+        for (agent_name, data) in agent_metadata {
+            requests.push(AgentMetadata { agent_name, data })
         }
 
         let peer_names = self
@@ -441,19 +456,47 @@ impl KVWorkerGroup {
         Ok(descs)
     }
 
+    pub async fn push_kv(
+        &self,
+        peer_names: Vec<String>,
+        kv_descs: Vec<Bytes>,
+        block_ids: Vec<u32>,
+    ) -> Result<bool> {
+        assert!(kv_descs.len() == self.workers.len());
+
+        let mut requests: Vec<_> = Vec::with_capacity(self.workers.len());
+        for (peer_name, descs) in peer_names.into_iter().zip(kv_descs) {
+            requests.push(PushKvRequest {
+                peer_name,
+                kv_descs: descs,
+                block_ids: block_ids.clone(),
+            })
+        }
+
+        let rets = self
+            .run_workers(&requests, move |worker, request| async move {
+                worker.push_kv(request).await
+            })
+            .await?;
+
+        let all_success = rets.iter().all(|&x| x);
+        Ok(all_success)
+    }
+
+    #[allow(dead_code)]
     pub async fn pull_kv(
         &self,
         peer_names: Vec<String>,
-        descs: Vec<Bytes>,
+        kv_descs: Vec<Bytes>,
         block_ids: Vec<u32>,
     ) -> Result<bool> {
-        assert!(descs.len() == self.workers.len());
+        assert!(kv_descs.len() == self.workers.len());
 
         let mut requests: Vec<_> = Vec::with_capacity(self.workers.len());
-        for (peer_name, desc) in peer_names.into_iter().zip(descs) {
+        for (peer_name, descs) in peer_names.into_iter().zip(kv_descs) {
             requests.push(PullKvRequest {
                 peer_name,
-                descs: desc,
+                descs,
                 block_ids: block_ids.clone(),
             })
         }

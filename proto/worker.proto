@@ -16,6 +16,7 @@ service KVWorker {
   rpc AddRemoteAgentMetadata(AgentMetadata)
       returns (AddRemoteAgentMetadataResponse);
   rpc GetDescriptors(GetDescriptorsRequest) returns (GetDescriptorsResponse);
+  rpc PushKV(PushKVRequest) returns (PushKVResponse);
   rpc PullKV(PullKVRequest) returns (PullKVResponse);
 }
 
@@ -81,13 +82,21 @@ message KVTransferRequest {
 
 message KVTransferResponse { bool success = 1; }
 
-message AgentMetadata { bytes data = 1; }
+message AgentMetadata { string agent_name = 1; bytes data = 2; }
 
 message AddRemoteAgentMetadataResponse { string peer_name = 1; }
 
 message GetDescriptorsRequest { repeated uint32 block_ids = 1; }
 
 message GetDescriptorsResponse { bytes descs = 1; }
+
+message PushKVRequest {
+  string peer_name = 1;
+  bytes kv_descs = 2;
+  repeated uint32 block_ids = 3;
+}
+
+message PushKVResponse { bool success = 1; }
 
 message PullKVRequest {
   string peer_name = 1;

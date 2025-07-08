@@ -1,10 +1,9 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
-use ahash::AHasher;
 use tracing::warn;
 
+use super::hash::compute_hash;
 use super::sequence::Sequence;
 use utils::collections::FifoSet;
 
@@ -22,12 +21,6 @@ struct Block {
     status: BlockStatus,
     token_ids: Vec<u32>,
     hash: u64,
-}
-
-fn compute_hash(token_ids: &[u32]) -> u64 {
-    let mut hasher = AHasher::default();
-    token_ids.hash(&mut hasher);
-    hasher.finish()
 }
 
 impl Block {
@@ -193,7 +186,7 @@ pub struct BlockManager {
     seq_block_mapping_table: HashMap<u64, BlockMap>,
     hash_block_table: HashMap<u64, u32>, // HashMap<hash value, block id>
     block_allocator: BlockAllocator,
-    seq_block_buffer: HashMap<u64, Vec<u32>>,
+    block_buffer: HashMap<String, Vec<u32>>, // HashMap<session_id, block_ids>
 }
 
 impl BlockManager {
@@ -205,7 +198,7 @@ impl BlockManager {
             seq_block_mapping_table: HashMap::new(),
             hash_block_table: HashMap::new(),
             block_allocator,
-            seq_block_buffer: HashMap::new(),
+            block_buffer: HashMap::new(),
         }
     }
 
@@ -430,45 +423,115 @@ impl BlockManager {
         reused_token_len
     }
 
-    pub fn hold_seq_tokens(
+    pub fn update_prefix_cache_blocks(&mut self, seq: &Sequence) -> usize {
+        let seq_id = seq.seq_id;
+        let token_ids = seq.get_token_ids();
+
+        let maybe_block_map = self.seq_block_mapping_table.get(&seq_id);
+        if maybe_block_map.is_none() {
+            return self.init_prefix_cache_blocks(seq);
+        }
+
+        let block_map = maybe_block_map.unwrap();
+
+        let mut cached_token_len = block_map.filled_token_len;
+        let mut add_block_ids: Vec<u32> = Vec::new();
+
+        let (block_ids, _) =
+            self.get_prefix_cache_blocks_range(token_ids, cached_token_len, token_ids.len());
+        for block_id in block_ids {
+            self.block_allocator.alloc_block_by_id(block_id);
+
+            cached_token_len += self.block_size;
+
+            add_block_ids.push(block_id);
+        }
+
+        let num_add_slots = cached_token_len - block_map.filled_token_len;
+
+        self.seq_block_mapping_table
+            .entry(seq_id)
+            .and_modify(|block_map| {
+                block_map.block_ids.append(&mut add_block_ids);
+                block_map.num_allocated_slots = cached_token_len;
+                block_map.filled_token_len = cached_token_len;
+            });
+
+        num_add_slots
+    }
+
+    pub fn reserve_buffer_by_tokens(
         &mut self,
-        seq_id: u64,
+        session_id: &str,
         token_ids: &[u32],
         start: usize,
-        end: usize,
-    ) -> Vec<u32> {
-        let start = start.div_ceil(self.block_size) * self.block_size;
-        let end = end.min(token_ids.len());
-        assert!(start <= end);
+    ) -> (Vec<u32>, Vec<u64>) {
+        let start = (start / self.block_size) * self.block_size;
+        let end = token_ids.len();
 
-        let mut new_block_ids: Vec<u32> = Vec::new();
+        let mut block_ids: Vec<u32> = Vec::new();
+        let mut hash_values: Vec<u64> = Vec::new();
 
         for token_offset in (start..end).step_by(self.block_size) {
             let token_end = min(token_offset + self.block_size, end);
             let sub_token_ids = &token_ids[token_offset..token_end];
 
+            // If sub_token_ids does not fully fill a block, Do not pin it.
+            if sub_token_ids.len() < self.block_size {
+                break;
+            }
+
             let block = self.block_allocator.alloc_block();
 
             block.append_tokens(&mut sub_token_ids.to_vec());
 
-            if block.get_num_empty_slots() == 0 {
-                let hash = compute_hash(&token_ids[..token_end]);
-                block.set_hash(hash);
-            }
+            let hash = compute_hash(&token_ids[..token_end]);
+            block.set_hash(hash);
 
-            new_block_ids.push(block.id);
+            block_ids.push(block.id);
+            hash_values.push(block.get_hash());
         }
 
-        self.seq_block_buffer.insert(seq_id, new_block_ids.clone());
+        if !block_ids.is_empty() {
+            self.block_buffer
+                .insert(session_id.to_string(), block_ids.clone());
+        }
 
-        new_block_ids
+        (block_ids, hash_values)
     }
 
-    pub fn release_seq_tokens(&mut self, seq_id: u64) {
-        if let Some(block_ids) = self.seq_block_buffer.remove(&seq_id) {
-            for block_id in block_ids {
+    pub fn pin_buffer_by_hashes(&mut self, session_id: &str, hash_values: &[u64]) -> Vec<u32> {
+        let mut block_ids: Vec<u32> = Vec::new();
+        for hash in hash_values {
+            if let Some(block_id) = self.lookup_block_id(*hash) {
+                self.block_allocator.alloc_block_by_id(block_id);
+                block_ids.push(block_id);
+            } else {
+                warn!(
+                    "Session [{}]: Block not found for hash {}. Aborting pinning buffer",
+                    session_id, hash
+                );
+                break;
+            }
+        }
+
+        if !block_ids.is_empty() {
+            self.block_buffer
+                .insert(session_id.to_string(), block_ids.clone());
+        }
+
+        block_ids
+    }
+
+    pub fn release_buffer(&mut self, session_id: &str, hash_values: &[u64]) {
+        if let Some(block_ids) = self.block_buffer.remove(session_id) {
+            for (hash, block_id) in hash_values.iter().zip(block_ids) {
                 let block = self.block_allocator.get_block(block_id);
-                self.hash_block_table.insert(block.get_hash(), block_id);
+                let block_hash = block.get_hash();
+                if block_hash == *hash {
+                    self.hash_block_table.entry(block_hash).or_insert(block_id);
+                }
+
                 self.block_allocator.free_block(block_id);
             }
         }
@@ -478,6 +541,7 @@ impl BlockManager {
         self.get_prefix_cache_blocks(token_ids).len()
     }
 
+    #[allow(dead_code)]
     pub fn get_prefix_cache_token_len(&self, token_ids: &[u32]) -> usize {
         self.get_prefix_cache_blocks(token_ids).len() * self.block_size
     }
