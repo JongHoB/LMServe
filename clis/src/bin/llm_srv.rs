@@ -172,7 +172,7 @@ impl Llm for LLMService {
             .engine
             .get_kv_agent_metadata()
             .await
-            .expect("Failed to get KV agent metadat");
+            .expect("Failed to get KV agent metadata");
 
         // FIXME(jinu)
         let agents = local_agent_metadata
@@ -181,6 +181,16 @@ impl Llm for LLMService {
             .collect();
 
         Ok(Response::new(KvAgentMetadata { agents }))
+    }
+
+    #[allow(unused_variables)]
+    async fn clear_cache(&self, request: Request<()>) -> Result<Response<()>, Status> {
+        self.engine
+            .clear_cache()
+            .await
+            .expect("Failed to clear cache");
+
+        Ok(Response::new(()))
     }
 }
 
@@ -197,7 +207,7 @@ fn random_available_port(range: std::ops::Range<u16>) -> Option<u16> {
     None
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     utils::logging::init_tracing();
 

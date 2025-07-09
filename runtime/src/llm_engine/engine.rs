@@ -200,8 +200,16 @@ impl LLMEngine {
     }
 
     async fn iter(&self) -> Option<Vec<InferTask>> {
-        let (infer_inputs, fetch_block_mappings, write_through_block_mappings) =
-            { self.scheduler.lock().await.schedule() };
+        let (infer_inputs, fetch_block_mappings, write_through_block_mappings) = {
+            // Lock scheduler briefly to check and schedule tasks.
+            let mut scheduler_guard = self.scheduler.lock().await;
+            if scheduler_guard.is_task_queue_empty() {
+                return None;
+            }
+
+            scheduler_guard.schedule()
+        };
+
         if infer_inputs.is_empty() {
             return None;
         }
@@ -274,6 +282,22 @@ impl LLMEngine {
         }
 
         hash_values[0..num_blocks].to_vec()
+    }
+
+    async fn clear_cache(&self) -> Result<()> {
+        loop {
+            {
+                let mut scheduler_guard = self.scheduler.lock().await;
+
+                if scheduler_guard.is_task_queue_empty() {
+                    scheduler_guard.clear_cache();
+                    break;
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+        Ok(())
     }
 }
 
@@ -463,5 +487,9 @@ impl LLMEngineWrapper {
                 request_event.notify_waiters()
             }
         }
+    }
+
+    pub async fn clear_cache(&self) -> Result<()> {
+        self.engine.clear_cache().await
     }
 }

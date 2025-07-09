@@ -216,4 +216,18 @@ impl EngineRouter {
         let d_gen_res: GenerateResponse = decode_client.trigger(d_trg_req).await?.into_inner();
         Ok(d_gen_res)
     }
+
+    pub async fn clear_cache(&self) -> Result<()> {
+        {
+            let mapping_table_guard = self.mapping_table.lock().await;
+
+            for endpoints in mapping_table_guard.values() {
+                for endpoint in endpoints {
+                    let mut client = LlmClient::connect(endpoint.clone()).await?;
+                    client.clear_cache(()).await?;
+                }
+            }
+        }
+        Ok(())
+    }
 }

@@ -570,4 +570,9 @@ impl BlockManager {
     pub fn get_block_usage(&self) -> f32 {
         self.block_allocator.get_block_usage()
     }
+
+    pub fn clear_cache(&mut self) {
+        self.hash_block_table.clear();
+        self.block_buffer.clear();
+    }
 }

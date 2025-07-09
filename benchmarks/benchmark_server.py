@@ -5,6 +5,7 @@ import aiohttp
 import asyncio
 import tqdm
 import numpy as np
+import requests
 
 from typing import List
 from collections.abc import Callable
@@ -61,6 +62,12 @@ async def run_client(
     done, pending = await asyncio.wait(background_tasks)
 
 
+def clear_cache(url: str):
+    print("Clearing Server-side KV Cache.")
+    requests.post(f"{url}/clear_cache")
+    print("Cache cleared successfully.")
+
+
 def main(args):
     print(args)
 
@@ -93,6 +100,9 @@ def main(args):
     intervals = np.random.exponential(1.0 / args.rate, size=num_requests)
 
     url = f"http://{args.host}:{args.port}"
+
+    # Clear server-side cache before running benchmark.
+    clear_cache(url)
 
     outputs: APIResponse = []
 

@@ -75,6 +75,11 @@ impl APIServer {
             token_latencies: response.token_latencies,
         })
     }
+
+    pub async fn clear_cache(&self) -> Result<()> {
+        self.router.clear_cache().await?;
+        Ok(())
+    }
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -104,18 +109,38 @@ async fn main() -> Result<()> {
     let api_server = Arc::new(APIServer::new(engine_router, tokenizer));
 
     // Build API server with a route.
-    let app = Router::new().route(
-        "/generate",
-        post(move |Json(params): Json<GenerateParams>| async move {
-            match api_server.generate(params).await {
-                Ok(output) => (StatusCode::OK, Json(output)).into_response(),
-                Err(err) => {
-                    eprintln!("Failed to generate: {:?}", err);
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Generation failed").into_response()
+    let app = Router::new()
+        .route(
+            "/generate",
+            post({
+                let api_server = api_server.clone();
+                move |Json(params): Json<GenerateParams>| async move {
+                    match api_server.generate(params).await {
+                        Ok(output) => (StatusCode::OK, Json(output)).into_response(),
+                        Err(err) => {
+                            eprintln!("Failed to generate: {:?}", err);
+                            (StatusCode::INTERNAL_SERVER_ERROR, "Generation failed").into_response()
+                        }
+                    }
                 }
-            }
-        }),
-    );
+            }),
+        )
+        .route(
+            "/clear_cache",
+            post({
+                let api_server = api_server.clone();
+                move || async move {
+                    match api_server.clear_cache().await {
+                        Ok(_) => (StatusCode::OK).into_response(),
+                        Err(err) => {
+                            eprintln!("Failed to clear cacahe: {:?}", err);
+                            (StatusCode::INTERNAL_SERVER_ERROR, "Clear cache failed")
+                                .into_response()
+                        }
+                    }
+                }
+            }),
+        );
 
     let listener = tokio::net::TcpListener::bind(socket_addr).await.unwrap();
     info!("API Server started to {url}");

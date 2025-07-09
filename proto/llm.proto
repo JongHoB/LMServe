@@ -18,6 +18,8 @@ service LLM {
   rpc transfer_kv(TransferKVRequest)  returns (TransferKVResponse);
 
   rpc trigger(TriggerRequest)  returns (GenerateResponse);
+
+  rpc clear_cache(google.protobuf.Empty) returns (google.protobuf.Empty);
 }
 
 message GetKindResponse {

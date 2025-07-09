@@ -56,6 +56,10 @@ impl Scheduler {
         }
     }
 
+    pub fn is_task_queue_empty(&self) -> bool {
+        self.allocated.is_empty() && self.waiting.is_empty() && self.pendding.is_empty()
+    }
+
     pub fn add(&mut self, infer_task: InferTask) {
         let seqs = infer_task.get_active_seqs();
         for seq in seqs.iter() {
@@ -437,6 +441,11 @@ impl Scheduler {
             self.gpu_block_manager.free(seq.seq_id);
             self.host_block_manager.free(seq.seq_id);
         }
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.gpu_block_manager.clear_cache();
+        self.host_block_manager.clear_cache();
     }
 
     fn get_log_text(&self) -> String {
