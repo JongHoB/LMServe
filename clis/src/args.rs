@@ -2,6 +2,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::configs;
+use runtime::types;
 
 #[derive(Parser, Debug, Serialize)]
 #[command(author, version, about)]
@@ -11,6 +12,9 @@ pub struct CLIArgs {
 
     #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
     pub model_name: String,
+
+    #[arg(long, default_value_t = configs::default_route_policy())]
+    pub route_policy: types::RoutePolicy,
 
     #[arg(long, default_value_t = configs::default_block_size())]
     pub block_size: usize,
@@ -48,6 +52,9 @@ pub struct APIServerArgs {
     #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
     pub model_name: String,
 
+    #[arg(long, default_value_t = configs::default_route_policy())]
+    pub route_policy: types::RoutePolicy,
+
     #[arg(long, default_value = "127.0.0.1:8000")]
     pub address: String,
 
@@ -64,7 +71,7 @@ pub struct APIServerArgs {
 #[command(author, version, about)]
 pub struct LLMSrvArgs {
     #[arg(long, default_value = "all")]
-    pub kind: String,
+    pub kind: types::EngineKind,
 
     #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
     pub model_name: String,

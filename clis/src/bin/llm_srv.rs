@@ -15,6 +15,7 @@ use tracing::{debug, info};
 use tracing_futures::Instrument;
 
 use runtime::llm_engine::engine::LLMEngineWrapper;
+use runtime::types::EngineKind;
 
 use clis::pb::llm::llm_server::{Llm, LlmServer};
 use clis::pb::llm::{
@@ -27,7 +28,7 @@ use clis::args::LLMSrvArgs;
 const WORKER_GROUP_UDS_PATH_PREFIX: &str = "/tmp/llmserve/group";
 
 pub struct LLMService {
-    kind: String,
+    kind: EngineKind,
     engine: Arc<LLMEngineWrapper>,
 }
 
@@ -36,7 +37,7 @@ impl Llm for LLMService {
     #[allow(unused_variables)]
     async fn get_kind(&self, request: Request<()>) -> Result<Response<GetKindResponse>, Status> {
         Ok(Response::new(GetKindResponse {
-            kind: self.kind.clone(),
+            kind: self.kind.to_string(),
         }))
     }
 

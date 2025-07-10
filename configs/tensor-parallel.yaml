@@ -3,6 +3,9 @@ model_name: "Qwen/Qwen2.5-7B"
 api_server:
   address: "127.0.0.1:8000"
 
+controller:
+  route_policy: "round_robin"
+
 llm_servers:
   - kind: "all"
     address: "127.0.0.1:7000"

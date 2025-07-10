@@ -10,7 +10,8 @@ use serde_json::Value;
 use tracing::info;
 
 use clis::args::{APIServerArgs, CLIArgs, LLMSrvArgs};
-use clis::configs::{APIServerConfig, LLMCluConfig, LLMSrvConfig};
+use clis::configs::{APIServerConfig, ControllerConfig, LLMCluConfig, LLMSrvConfig};
+use runtime::types;
 
 fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
     let value = serde_json::to_value(args).expect("serialization failed");
@@ -68,12 +69,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 address: args.address.clone(),
             };
 
+            let controller_config = ControllerConfig {
+                route_policy: args.route_policy,
+            };
+
             let llm_server_configs = (0..args.num_worker_groups)
                 .map(|i| {
                     let port = LLMSERVE_BASE_PORT + i;
 
                     LLMSrvConfig {
-                        kind: "full".to_string(),
+                        kind: types::EngineKind::All,
                         block_size: args.block_size,
                         gpu_memory_fraction: args.gpu_memory_fraction,
                         host_kv_cache_size: args.host_kv_cache_size,
@@ -89,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             LLMCluConfig {
                 model_name: args.model_name,
                 api_server: api_server_config,
+                controller: controller_config,
                 llm_servers: llm_server_configs,
             }
         }
@@ -101,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (group_id, llm_server) in config.llm_servers.iter().enumerate() {
         let devices: Vec<u8> = (device_offset..(device_offset + llm_server.tp_size)).collect();
         let llm_srv_args = LLMSrvArgs {
-            kind: llm_server.kind.clone(),
+            kind: llm_server.kind,
             model_name: model_name.clone(),
             block_size: llm_server.block_size,
             gpu_memory_fraction: llm_server.gpu_memory_fraction,
@@ -132,6 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api_server_args = APIServerArgs {
         model_name: model_name.clone(),
+        route_policy: config.controller.route_policy,
         address: config.api_server.address,
         llm_server_addresses,
     };

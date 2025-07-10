@@ -7,7 +7,7 @@ use tokenizers::tokenizer::{Result, Tokenizer};
 use tracing::info;
 
 use runtime::pb::llm::GenerateRequest;
-use runtime::router::EngineRouter;
+use runtime::router::Controller;
 
 use clis::args::APIServerArgs;
 
@@ -30,13 +30,16 @@ pub struct GenerateParams {
 }
 
 pub struct APIServer {
-    pub router: EngineRouter,
+    pub controller: Controller,
     pub tokenizer: Tokenizer,
 }
 
 impl APIServer {
-    pub fn new(router: EngineRouter, tokenizer: Tokenizer) -> Self {
-        Self { router, tokenizer }
+    pub fn new(controller: Controller, tokenizer: Tokenizer) -> Self {
+        Self {
+            controller,
+            tokenizer,
+        }
     }
 
     pub async fn generate(&self, params: GenerateParams) -> Result<GenerateOutput> {
@@ -52,7 +55,7 @@ impl APIServer {
             .to_vec();
 
         let response = self
-            .router
+            .controller
             .generate(GenerateRequest {
                 session_id,
                 input_ids: input_ids.clone(),
@@ -77,7 +80,7 @@ impl APIServer {
     }
 
     pub async fn clear_cache(&self) -> Result<()> {
-        self.router.clear_cache().await?;
+        self.controller.clear_cache().await?;
         Ok(())
     }
 }
@@ -95,10 +98,10 @@ async fn main() -> Result<()> {
     let tokenizer =
         Tokenizer::from_pretrained(&args.model_name, None).expect("Failed to load tokenizer");
 
-    let mut engine_router = EngineRouter::new();
+    let controller: Controller = Controller::new(args.route_policy);
     for addr in args.llm_server_addresses.iter() {
         let llm_server_url = format!("http://{}", addr);
-        engine_router
+        controller
             .add_node(&llm_server_url)
             .await
             .unwrap_or_else(|e| panic!("Unable to establish connection to engine ({addr}): {e}"));
@@ -106,7 +109,7 @@ async fn main() -> Result<()> {
         info!("Successfully connected to LLM server at {}", addr);
     }
 
-    let api_server = Arc::new(APIServer::new(engine_router, tokenizer));
+    let api_server = Arc::new(APIServer::new(controller, tokenizer));
 
     // Build API server with a route.
     let app = Router::new()

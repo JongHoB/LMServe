@@ -1,3 +1,4 @@
+use runtime::types;
 use serde::Deserialize;
 
 macro_rules! default_fn {
@@ -8,6 +9,11 @@ macro_rules! default_fn {
     };
 }
 
+default_fn!(
+    default_route_policy,
+    types::RoutePolicy,
+    types::RoutePolicy::RoundRobin
+);
 default_fn!(default_block_size, usize, 8);
 default_fn!(default_gpu_memory_fraction, f32, 0.9);
 default_fn!(default_host_kv_cache_size, usize, 16);
@@ -22,6 +28,8 @@ pub struct LLMCluConfig {
 
     pub api_server: APIServerConfig,
 
+    pub controller: ControllerConfig,
+
     pub llm_servers: Vec<LLMSrvConfig>,
 }
 
@@ -31,8 +39,14 @@ pub struct APIServerConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ControllerConfig {
+    #[serde(default = "default_route_policy")]
+    pub route_policy: types::RoutePolicy,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct LLMSrvConfig {
-    pub kind: String,
+    pub kind: types::EngineKind,
 
     pub address: String,
 
