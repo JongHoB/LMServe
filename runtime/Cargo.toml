@@ -22,6 +22,8 @@ once_cell = "1.21.3"
 rand.workspace = true
 strum = "0.27.1"
 strum_macros = "0.27.1"
+tower = "0.5.2"
+hyper-util = "0.1.15"
 
 [build-dependencies]
 tonic-build = { workspace = true }

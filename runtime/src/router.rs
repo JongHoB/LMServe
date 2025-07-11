@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 use tracing::debug;
 
 use crate::pb::llm::llm_client::LlmClient;
@@ -18,14 +18,13 @@ use crate::types::{EngineKind, RoutePolicy};
 
 struct Node {
     kind: EngineKind,
-    endpoint: Endpoint,
+    channel: Channel,
     kv_agent_metadata: KvAgentMetadata,
 }
 
 impl Node {
     async fn connect(&self) -> Result<LlmClient<Channel>> {
-        let client = LlmClient::connect(self.endpoint.clone()).await?;
-        Ok(client)
+        Ok(LlmClient::new(self.channel.clone()))
     }
 }
 
@@ -33,8 +32,8 @@ async fn establish_node(uri: &str) -> Result<Node> {
     let uri: String = uri.parse().unwrap();
     let endpoint = Channel::from_shared(uri.clone().into_bytes())?;
 
-    let mut client = loop {
-        match LlmClient::connect(endpoint.clone()).await {
+    let channel = loop {
+        match endpoint.connect().await {
             Ok(client) => {
                 break client;
             }
@@ -46,6 +45,7 @@ async fn establish_node(uri: &str) -> Result<Node> {
         sleep(Duration::from_millis(500)).await;
     };
 
+    let mut client = LlmClient::new(channel.clone());
     let kind_response = client.get_kind(()).await?.into_inner();
     let kind =
         EngineKind::from_str(&kind_response.kind).unwrap_or_else(|e| panic!("Invalid kind: {e}"));
@@ -54,7 +54,7 @@ async fn establish_node(uri: &str) -> Result<Node> {
 
     Ok(Node {
         kind,
-        endpoint,
+        channel,
         kv_agent_metadata,
     })
 }

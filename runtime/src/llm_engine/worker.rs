@@ -1,10 +1,12 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, marker::PhantomData, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::future::join_all;
 
-use tokio::{sync::Mutex, time::sleep};
-
-use tonic::transport::Channel;
+use hyper_util::rt::TokioIo;
+use tokio::net::UnixStream;
+use tokio::time::sleep;
+use tonic::transport::{Channel, Endpoint, Uri};
+use tower::service_fn;
 
 use tracing::debug;
 
@@ -15,29 +17,28 @@ use crate::pb::worker::{
     KvTransferRequest, PullKvRequest, PushKvRequest, WarmupRequest,
 };
 
+use super::Bytes;
 use super::infer_task::{InferInput, InferOutput};
-
-type Bytes = Vec<u8>;
 
 type StdError = Box<dyn std::error::Error + Send + Sync + 'static>;
 type Result<T, E = StdError> = std::result::Result<T, E>;
 
 #[tonic::async_trait]
 pub trait GrpcClient: Send + Sync + Sized + 'static {
-    async fn connect(address: String) -> Result<Self, tonic::transport::Error>;
+    fn new(channel: Channel) -> Self;
 }
 
 #[tonic::async_trait]
 impl GrpcClient for WorkerClient<Channel> {
-    async fn connect(address: String) -> Result<Self, tonic::transport::Error> {
-        WorkerClient::connect(address).await
+    fn new(channel: Channel) -> Self {
+        WorkerClient::new(channel)
     }
 }
 
 #[tonic::async_trait]
 impl GrpcClient for KvWorkerClient<Channel> {
-    async fn connect(address: String) -> Result<Self, tonic::transport::Error> {
-        KvWorkerClient::connect(address).await
+    fn new(channel: Channel) -> Self {
+        KvWorkerClient::new(channel)
     }
 }
 
@@ -45,34 +46,78 @@ impl GrpcClient for KvWorkerClient<Channel> {
 trait Worker: Send + Sync + Sized + 'static {
     type Client: GrpcClient;
 
-    async fn connect(address: String) -> Result<Self>;
+    async fn new(address: String) -> Result<Self>;
+
+    fn connect(&self) -> Self::Client;
 }
 
 pub struct WorkerImpl<T: GrpcClient> {
-    client: Arc<Mutex<T>>,
+    channel: Channel,
+    _marker: PhantomData<T>,
 }
 
 #[tonic::async_trait]
 impl<T: GrpcClient> Worker for WorkerImpl<T> {
     type Client = T;
-    async fn connect(address: String) -> Result<Self> {
+
+    async fn new(address: String) -> Result<Self> {
         // TODO(jinu): Add timeout
-        let client = loop {
-            match T::connect(address.clone()).await {
-                Ok(client) => {
-                    debug!("Successfully connected to {address}");
-                    break client;
+        let channel = if let Some(path) = address.strip_prefix("unix://") {
+            let sock: PathBuf = PathBuf::from(path);
+
+            loop {
+                let sock = sock.clone();
+
+                // Open a gRPC channel over a Unix domain socket using a custom connector.
+                // The URI below is just a placeholder.
+                // Ref: https://github.com/hyperium/tonic/blob/master/examples/src/uds/client_with_connector.rs
+                match Endpoint::try_from("http://[::]:50051")? // Dummy address, not used
+                    .connect_with_connector(service_fn(move |_: Uri| {
+                        let sock = sock.clone();
+
+                        async move {
+                            // Connect to a UDS socket
+                            Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(sock).await?))
+                        }
+                    }))
+                    .await
+                {
+                    Ok(channel) => {
+                        debug!("Successfully connected to {:?}", address);
+                        break channel;
+                    }
+                    Err(error) => {
+                        debug!("Trying to connect to worker ({:?}): {:?}", address, error);
+                        sleep(Duration::from_millis(500)).await;
+                    }
                 }
-                Err(error) => {
-                    debug!("Trying to connect to worker ({}): {:?}", address, error);
-                    sleep(Duration::from_millis(500)).await;
-                }
+            }
+        } else {
+            let uri: String = address.parse().unwrap();
+            let endpoint = Channel::from_shared(uri.clone().into_bytes())?;
+
+            loop {
+                match endpoint.connect().await {
+                    Ok(channel) => {
+                        debug!("Successfully connected to {address}");
+                        break channel;
+                    }
+                    Err(error) => {
+                        debug!("Trying to connect to worker ({}): {:?}", address, error);
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                };
             }
         };
 
         Ok(Self {
-            client: Arc::new(Mutex::new(client)),
+            channel,
+            _marker: PhantomData,
         })
+    }
+
+    fn connect(&self) -> T {
+        T::new(self.channel.clone())
     }
 }
 
@@ -81,19 +126,22 @@ type KVWorker = WorkerImpl<KvWorkerClient<Channel>>;
 
 impl ModelWorker {
     async fn warmup(&self, request: WarmupRequest) -> Result<(u64, u64)> {
-        let response = self.client.lock().await.warmup(request).await?;
+        let mut client = self.connect();
+        let response = client.warmup(request).await?;
         let response = response.into_inner();
         Ok((response.gpu_total_mem_size, response.gpu_peak_mem_size))
     }
 
     async fn infer(&self, request: InferRequest) -> Result<HashMap<u64, InferOutput>> {
-        let response = self.client.lock().await.infer(request).await?;
+        let mut client = self.connect();
+        let response = client.infer(request).await?;
         let outputs = response.into_inner().outputs;
         Ok(outputs)
     }
 
     async fn init_cache(&self, request: InitCacheRequest) -> Result<(u64, u64)> {
-        let response = self.client.lock().await.init_cache(request).await?;
+        let mut client = self.connect();
+        let response = client.init_cache(request).await?;
         let response = response.into_inner();
         let num_gpu_blocks = response.num_gpu_blocks;
         let num_host_blocks = response.num_host_blocks;
@@ -103,17 +151,14 @@ impl ModelWorker {
 
 impl KVWorker {
     async fn transfer_kv(&self, request: KvTransferRequest) -> Result<()> {
-        let _ = self.client.lock().await.transfer_kv(request).await?;
+        let mut client = self.connect();
+        let _ = client.transfer_kv(request).await?;
         Ok(())
     }
 
     async fn get_local_agent_metadata(&self) -> Result<(String, Vec<u8>)> {
-        let response = self
-            .client
-            .lock()
-            .await
-            .get_local_agent_metadata(())
-            .await?;
+        let mut client = self.connect();
+        let response = client.get_local_agent_metadata(()).await?;
 
         let response = response.into_inner();
         let agent_name = response.agent_name;
@@ -122,49 +167,30 @@ impl KVWorker {
     }
 
     async fn add_remote_agent_metadata(&self, request: AgentMetadata) -> Result<String> {
-        let response = self
-            .client
-            .lock()
-            .await
-            .add_remote_agent_metadata(request)
-            .await?;
+        let mut client = self.connect();
+        let response = client.add_remote_agent_metadata(request).await?;
         let peer_name = response.into_inner().peer_name;
         Ok(peer_name)
     }
 
     async fn get_descriptors(&self, request: GetDescriptorsRequest) -> Result<Bytes> {
-        let response = self
-            .client
-            .lock()
-            .await
-            .get_descriptors(request)
-            .await?
-            .into_inner();
+        let mut client = self.connect();
+        let response = client.get_descriptors(request).await?.into_inner();
 
         let descs = response.descs;
         Ok(descs)
     }
 
     async fn push_kv(&self, request: PushKvRequest) -> Result<bool> {
-        let response = self
-            .client
-            .lock()
-            .await
-            .push_kv(request)
-            .await?
-            .into_inner();
+        let mut client = self.connect();
+        let response = client.push_kv(request).await?.into_inner();
 
         Ok(response.success)
     }
 
     async fn pull_kv(&self, request: PullKvRequest) -> Result<bool> {
-        let response = self
-            .client
-            .lock()
-            .await
-            .pull_kv(request)
-            .await?
-            .into_inner();
+        let mut client = self.connect();
+        let response = client.pull_kv(request).await?.into_inner();
 
         Ok(response.success)
     }
@@ -304,7 +330,7 @@ impl ModelWorkerGroup {
         let mut workers: Vec<_> = Vec::with_capacity(num_workers as usize);
         for rank in 0..num_workers {
             let address = format!("unix://{}/model-{}", worker_group_uds_path, rank);
-            let worker = ModelWorker::connect(address.parse().unwrap())
+            let worker = ModelWorker::new(address.parse().unwrap())
                 .await
                 .unwrap_or_else(|e| panic!("Failed to connect worker: {e}"));
             workers.push(Arc::new(worker));
@@ -389,7 +415,7 @@ impl KVWorkerGroup {
         let mut workers: Vec<_> = Vec::with_capacity(num_workers as usize);
         for rank in 0..num_workers {
             let address = format!("unix://{}/model-{}-kv", worker_group_uds_path, rank);
-            let worker = KVWorker::connect(address.parse().unwrap())
+            let worker = KVWorker::new(address.parse().unwrap())
                 .await
                 .unwrap_or_else(|e| panic!("Failed to connect worker: {e}"));
             workers.push(Arc::new(worker));
