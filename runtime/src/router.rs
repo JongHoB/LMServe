@@ -265,34 +265,25 @@ impl Controller {
     pub async fn generate(&self, request: GenerateRequest) -> Result<GenerateResponse> {
         let response = if self.prefill_router.get_num_nodes().await > 0 {
             // P/D disaggregation serving
-            let num_samples = request.num_samples;
             let max_output_len = request.max_output_len;
-            let ignore_eos = request.ignore_eos;
-            let session_id = request.session_id;
+            let mut p_gen_req = request.clone();
+            let mut d_gen_req = request;
 
-            let p_gen_req = GenerateRequest {
-                session_id: session_id.clone(),
-                input_ids: request.input_ids.clone(),
-                num_samples: 1,
-                max_output_len: Some(1),
-                ignore_eos,
-            };
+            p_gen_req.num_samples = 1;
+            p_gen_req.max_output_len = Some(1);
 
             let (p_gen_res, p_node) = self.prefill_router.route(p_gen_req).await?;
 
-            let output_ids = p_gen_res.output_ids;
-            let max_output_len = max_output_len.map(|max_output_len| max_output_len - 1);
+            d_gen_req
+                .input_ids
+                .append(&mut p_gen_res.output_ids.clone());
+            d_gen_req.max_output_len = max_output_len.map(|v| v.saturating_sub(1));
 
-            let new_input_ids = [request.input_ids.clone(), output_ids].concat();
-            let d_gen_req = GenerateRequest {
-                session_id: session_id.clone(),
-                input_ids: new_input_ids,
-                num_samples,
-                max_output_len,
-                ignore_eos,
-            };
+            let (mut d_gen_res, _) = self.router.forward(&p_node, d_gen_req).await?;
 
-            let (res, _) = self.router.forward(&p_node, d_gen_req).await?;
+            let mut res = p_gen_res;
+            res.output_ids.append(&mut d_gen_res.output_ids);
+            res.token_latencies.append(&mut d_gen_res.token_latencies);
 
             res
         } else {

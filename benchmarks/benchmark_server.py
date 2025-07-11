@@ -171,6 +171,18 @@ def main(args):
     print("P50: {:.2f} ms, P90: {:.2f} ms, P99: {:.2f} ms".format(
         tpot_tails[0] * 1000, tpot_tails[1] * 1000, tpot_tails[2] * 1000))
 
+    # Time to Second Token
+    ttsts = [o['token_latencies'][1]
+             for o in outputs if len(o['token_latencies']) > 1]
+    ttst_tails = np.percentile(
+        ttsts,
+        method="closest_observation",
+        q=[50, 90, 99],
+    )
+    print("Second token latency:")
+    print("P50: {:.2f} ms, P90: {:.2f} ms, P99: {:.2f} ms".format(
+        ttst_tails[0] * 1000, ttst_tails[1] * 1000, ttst_tails[2] * 1000))
+
     if args.print_output_text:
         outputs.sort(key=lambda o: o['output_len'])
         print("Below are the generated text of the processed requests:")
