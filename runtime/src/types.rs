@@ -15,4 +15,5 @@ pub enum EngineKind {
 #[serde(rename_all = "snake_case")]
 pub enum RoutePolicy {
     RoundRobin,
+    LoadBalance,
 }

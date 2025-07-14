@@ -19,8 +19,9 @@ use runtime::types::EngineKind;
 
 use clis::pb::llm::llm_server::{Llm, LlmServer};
 use clis::pb::llm::{
-    AgentMetadata, GenerateRequest, GenerateResponse, GetKindResponse, KvAgentMetadata,
-    ReserveRequest, ReserveResponse, TransferKvRequest, TransferKvResponse, TriggerRequest,
+    AgentMetadata, EngineStatus, GenerateRequest, GenerateResponse, GetKindResponse,
+    GetStatusResponse, KvAgentMetadata, ReserveRequest, ReserveResponse, TransferKvRequest,
+    TransferKvResponse, TriggerRequest,
 };
 
 use clis::args::LLMSrvArgs;
@@ -38,6 +39,31 @@ impl Llm for LLMService {
     async fn get_kind(&self, request: Request<()>) -> Result<Response<GetKindResponse>, Status> {
         Ok(Response::new(GetKindResponse {
             kind: self.kind.to_string(),
+        }))
+    }
+
+    #[allow(unused_variables)]
+    async fn get_status(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<GetStatusResponse>, Status> {
+        let engine_status = self
+            .engine
+            .get_status()
+            .await
+            .expect("Failed to get status");
+
+        let status = EngineStatus {
+            num_running_reqs: engine_status.num_running_reqs as u64,
+            num_allocated_reqs: engine_status.num_allocated_reqs as u64,
+            num_waiting_reqs: engine_status.num_waiting_reqs as u64,
+            num_pendding_reqs: engine_status.num_pendding_reqs as u64,
+            gpu_kv_block_usage: engine_status.gpu_kv_block_usage,
+            host_kv_block_usage: engine_status.host_kv_block_usage,
+        };
+
+        Ok(Response::new(GetStatusResponse {
+            engine_status: Some(status),
         }))
     }
 

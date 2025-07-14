@@ -57,3 +57,12 @@ pub struct ReserveOutput {
 pub struct TransferOutput {
     pub hash_values: Vec<u64>,
 }
+
+pub struct EngineStatus {
+    pub num_running_reqs: usize,
+    pub num_allocated_reqs: usize,
+    pub num_waiting_reqs: usize,
+    pub num_pendding_reqs: usize,
+    pub gpu_kv_block_usage: f32,
+    pub host_kv_block_usage: f32,
+}

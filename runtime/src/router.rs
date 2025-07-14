@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tonic::transport::Channel;
 use tracing::debug;
@@ -112,9 +112,67 @@ impl NodeScheduler for RoundRobinNodeScheduler {
     }
 }
 
+struct LoadBalanceNodeScheduler {
+    nodes: Arc<RwLock<Vec<Arc<Node>>>>,
+}
+
+impl LoadBalanceNodeScheduler {
+    fn new() -> Self {
+        Self {
+            nodes: Default::default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl NodeScheduler for LoadBalanceNodeScheduler {
+    async fn add_node(&self, node: Node) {
+        self.nodes.write().await.push(Arc::new(node));
+    }
+
+    #[allow(unused_variables)]
+    async fn select(&self, request: &GenerateRequest) -> Result<Arc<Node>> {
+        let nodes_guard = self.nodes.read().await;
+
+        let mut min_index = 0;
+        let mut min_value = f32::INFINITY;
+        for (i, node) in nodes_guard.iter().enumerate() {
+            let mut client = node.connect().await?;
+            let response = client.get_status(()).await?.into_inner();
+
+            let value = response
+                .engine_status
+                .map(|status| status.gpu_kv_block_usage)
+                .unwrap_or(0.);
+
+            if value < min_value {
+                min_index = i;
+                min_value = value;
+            }
+        }
+
+        let node = nodes_guard
+            .get(min_index)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Routing failed: no available nodes"))?;
+
+        Ok(node)
+    }
+
+    async fn get_nodes(&self) -> Vec<Arc<Node>> {
+        let nodes_guard = self.nodes.read().await;
+        nodes_guard.iter().cloned().collect()
+    }
+
+    async fn get_num_nodes(&self) -> usize {
+        self.nodes.read().await.len()
+    }
+}
+
 fn get_node_scheduler(policy: RoutePolicy) -> Box<dyn NodeScheduler> {
     match policy {
         RoutePolicy::RoundRobin => Box::new(RoundRobinNodeScheduler::new()),
+        RoutePolicy::LoadBalance => Box::new(LoadBalanceNodeScheduler::new()),
     }
 }
 

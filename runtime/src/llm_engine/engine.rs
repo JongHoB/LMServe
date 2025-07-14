@@ -8,8 +8,8 @@ use tracing::info;
 
 use super::Bytes;
 use super::infer_task::InferTask;
-use super::outputs::{GenerateOutput, ReserveOutput, TransferOutput};
-use super::scheduler::Scheduler;
+use super::outputs::{EngineStatus, GenerateOutput, ReserveOutput, TransferOutput};
+use super::scheduler::{SchedStatus, Scheduler};
 use super::sequence::Sequence;
 use super::worker::{KVWorkerGroup, ModelWorkerGroup};
 
@@ -109,6 +109,10 @@ impl LLMEngine {
             local_kv_agent_metadata,
             scheduler: Arc::new(Mutex::new(scheduler)),
         })
+    }
+
+    async fn get_status(&self) -> SchedStatus {
+        self.scheduler.lock().await.get_status()
     }
 
     async fn add_request(
@@ -340,6 +344,20 @@ impl LLMEngineWrapper {
             request_events: Mutex::new(HashMap::new()),
             request_outputs: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub async fn get_status(&self) -> Result<EngineStatus> {
+        let sched_status = self.engine.get_status().await;
+        let engine_status = EngineStatus {
+            num_running_reqs: sched_status.num_running_reqs,
+            num_allocated_reqs: sched_status.num_allocated_reqs,
+            num_waiting_reqs: sched_status.num_waiting_reqs,
+            num_pendding_reqs: sched_status.num_pendding_reqs,
+            gpu_kv_block_usage: sched_status.gpu_kv_block_usage,
+            host_kv_block_usage: sched_status.host_kv_block_usage,
+        };
+
+        Ok(engine_status)
     }
 
     pub async fn add_remote_agent(

@@ -7,6 +7,8 @@ package LLM;
 service LLM {
   rpc get_kind(google.protobuf.Empty) returns (GetKindResponse);
 
+  rpc get_status(google.protobuf.Empty) returns (GetStatusResponse);
+
   rpc get_kv_agent_metadata(google.protobuf.Empty) returns (KVAgentMetadata);
 
   rpc add_remote_kv_agent(KVAgentMetadata) returns (google.protobuf.Empty);
@@ -24,6 +26,19 @@ service LLM {
 
 message GetKindResponse {
   string kind = 1;
+}
+
+message EngineStatus {
+  uint64 num_running_reqs = 1;
+  uint64 num_allocated_reqs = 2;
+  uint64 num_waiting_reqs = 3;
+  uint64 num_pendding_reqs = 4;
+  float gpu_kv_block_usage = 5;
+  float host_kv_block_usage = 6;
+}
+
+message GetStatusResponse {
+  EngineStatus engine_status = 1;
 }
 
 message GenerateRequest {
