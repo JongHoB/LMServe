@@ -1,6 +1,7 @@
 import numpy as np
+from datasets import Dataset
 
-from typing import List
+from typing import List, Optional, Tuple
 from transformers import AutoTokenizer
 
 from .request import APIRequest
@@ -10,11 +11,17 @@ from .dataset_config import get_dataset_config, DatasetConfig
 def load_and_preprocess_dataset(
     dataset_name: str,
     tokenizer_name: str,
-    max_length: int,
-):
+    max_length: Optional[int] = None,
+    include_time: bool = False,
+) -> Dataset:
     config: DatasetConfig = get_dataset_config(dataset_name)
     dataset = config.load_fn(**config.args)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+    if include_time:
+        if "timestamp" not in dataset.column_names:
+            raise RuntimeError(
+                f"Dataset '{dataset_name}' does not have a 'timestamp' column")
 
     def tokenize_function(data):
         tokenized_input = tokenizer(data[config.prompt_col],
@@ -27,12 +34,17 @@ def load_and_preprocess_dataset(
         input_ids = tokenized_input["input_ids"]
         output_ids = tokenized_output["input_ids"]
 
-        return {
+        ret = {
             "prompt": data[config.prompt_col],
             "output": data[config.output_col],
             "input_ids": input_ids,
             "output_ids": output_ids,
         }
+
+        if include_time:
+            ret["timestamp"] = data["timestamp"]
+
+        return ret
 
     tokenized_dataset = dataset.map(tokenize_function, batched=True)
     return tokenized_dataset
@@ -77,6 +89,44 @@ def generate_requests(
                 break
 
     return requests
+
+
+def generate_trace(
+    dataset_name: str,
+    tokenizer_name: str,
+    num_requests: int,
+) -> Tuple[List[APIRequest], List[float]]:
+
+    dataset = load_and_preprocess_dataset(
+        dataset_name=dataset_name,
+        tokenizer_name=tokenizer_name,
+        include_time=True,
+    )
+
+    requests: List[APIRequest] = []
+    timestamps: List[float] = []
+    num_requests_counter = 0
+    while num_requests_counter < num_requests:
+        for data in dataset.to_iterable_dataset():
+            request = APIRequest(
+                prompt=data['prompt'],
+                num_samples=1,
+                max_output_len=len(data['output_ids']),
+                ignore_eos=True,
+            )
+
+            requests.append(request)
+            timestamps.append(data['timestamp'])
+
+            num_requests_counter += 1
+
+            if num_requests_counter >= num_requests:
+                break
+
+    intervals = [0] + [(timestamps[i] - timestamps[i - 1])
+                       for i in range(1, len(timestamps))]
+
+    return (requests, intervals)
 
 
 def generate_radom_requests(

@@ -33,9 +33,13 @@ dataset_configs = {
     DatasetConfig(load_from_disk, {
         "dataset_path": os.path.join(base_dir, "datasets/sharegpt"),
     }, "human", "gpt"),
-    "azure":
+    "azure_conv":
     DatasetConfig(load_from_disk, {
-        "dataset_path": os.path.join(base_dir, "datasets/azure"),
+        "dataset_path": os.path.join(base_dir, "datasets/azure_conv"),
+    }, "input", "output"),
+    "azure_code":
+    DatasetConfig(load_from_disk, {
+        "dataset_path": os.path.join(base_dir, "datasets/azure_code"),
     }, "input", "output"),
 }
 

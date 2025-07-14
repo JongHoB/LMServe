@@ -1,8 +1,8 @@
 import json
-import csv
 import os
 import argparse
 import subprocess
+import pandas as pd
 import numpy as np
 
 from datasets import Dataset
@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
-dataset_names = ["sharegpt", "azure"]
+dataset_names = ["sharegpt", "azure_conv", "azure_code"]
 
 
 def check_and_make_data_path(path: str):
@@ -58,56 +58,77 @@ def prepare_sharegpt():
     dataset.save_to_disk(output_path)
 
 
-def prepare_azure(tokenizer_name: AutoTokenizer):
+def prepare_azure(tokenizer_name: AutoTokenizer, type: str):
     data_path = os.path.join(base_dir, "data")
     check_and_make_data_path(data_path)
 
-    dataset_path = os.path.join(data_path, "AzureLLMInferenceTrace_conv.csv")
+    trace_file = f"AzureLLMInferenceTrace_{type}.csv"
 
+    dataset_path = os.path.join(data_path, trace_file)
     if not os.path.isfile(dataset_path):
+        url = f"https://raw.githubusercontent.com/Azure/AzurePublicDataset/refs/heads/master/data/AzureLLMInferenceTrace_{type}.csv"
+
         print("Download dataset...")
         subprocess.run([
             "wget", "-O", dataset_path,
-            "https://raw.githubusercontent.com/Azure/AzurePublicDataset/refs/heads/master/data/AzureLLMInferenceTrace_conv.csv"
+            url,
         ])
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     vocab_size = tokenizer.vocab_size
 
+    timestamps = []
     input_ids = []
     output_ids = []
-    with open(dataset_path, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        reader.__next__()
-        for timestamp, input_len, output_len in reader:
-            input_len = int(input_len)
-            output_len = int(output_len)
-            input_ids.append(np.random.randint(vocab_size, size=input_len))
-            output_ids.append(np.random.randint(vocab_size, size=output_len))
+
+    df = pd.read_csv(
+        dataset_path,
+        names=["TIMESTAMP", "ContextTokens", "GeneratedTokens"],
+        header=0,
+        parse_dates=["TIMESTAMP"],
+    )
+
+    start = df["TIMESTAMP"].iloc[0]
+    df["TIMESTAMP"] = (df["TIMESTAMP"] - start).dt.total_seconds()
+    for _, row in df.iterrows():
+        timestamp = row["TIMESTAMP"]
+        input_len = row["ContextTokens"].astype(int)
+        output_len = row["GeneratedTokens"].astype(int)
+
+        timestamps.append(timestamp)
+        input_ids.append(np.random.randint(vocab_size, size=input_len))
+        output_ids.append(np.random.randint(vocab_size, size=output_len))
 
     inputs = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
     outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
 
     data = [{
+        "timestamp": timestamp,
         "input": in_text,
         "output": out_text
-    } for in_text, out_text in zip(inputs, outputs)]
+    } for timestamp, in_text, out_text in zip(timestamps, inputs, outputs)]
 
     dataset = Dataset.from_list(data)
 
-    output_path = os.path.join(base_dir, "datasets/azure")
+    output_path = os.path.join(base_dir, f"datasets/azure_{type}")
     dataset.save_to_disk(output_path)
 
 
 def prepare_dataset(dataset: str, tokenizer: str):
     if dataset == "sharegpt":
         prepare_sharegpt()
-    elif dataset == "azure":
+    elif dataset == "azure_conv":
         if not tokenizer:
             raise ValueError(
                 "'--tokenizer' argument is required because the dataset is generated based on the provided tokenizer"
             )
-        prepare_azure(tokenizer)
+        prepare_azure(tokenizer, "conv")
+    elif dataset == "azure_code":
+        if not tokenizer:
+            raise ValueError(
+                "'--tokenizer' argument is required because the dataset is generated based on the provided tokenizer"
+            )
+        prepare_azure(tokenizer, "code")
 
 
 if __name__ == "__main__":

@@ -10,8 +10,9 @@ import requests
 from typing import List
 from collections.abc import Callable
 
-from generator import (generate_requests, generate_radom_requests, APIRequest,
-                       APIResponse, supported_dataset_names)
+from generator import (generate_requests, generate_radom_requests,
+                       generate_trace, APIRequest, APIResponse,
+                       supported_dataset_names)
 
 background_tasks = set()
 
@@ -71,19 +72,32 @@ def clear_cache(url: str):
 def main(args):
     print(args)
 
-    num_requests = args.num_requests + args.num_padding_requests
+    url = f"http://{args.host}:{args.port}"
 
+    num_requests = args.num_requests + args.num_padding_requests
+    num_benchmark_reqs = args.num_requests
+
+    intervals = np.random.exponential(1.0 / args.rate, size=num_requests)
+
+    requests: List[APIRequest] = []
     if args.dataset is not None:
-        requests: List[APIRequest] = generate_requests(
-            dataset_name=args.dataset,
-            tokenizer_name=args.tokenizer,
-            num_requests=num_requests,
-            max_seq_len=args.max_seq_len,
-            num_samples=args.num_samples,
-            ignore_eos=not args.disable_ignore_eos,
-        )
+        if args.use_time:
+            (requests, intervals) = generate_trace(
+                dataset_name=args.dataset,
+                tokenizer_name=args.tokenizer,
+                num_requests=num_requests,
+            )
+        else:
+            requests = generate_requests(
+                dataset_name=args.dataset,
+                tokenizer_name=args.tokenizer,
+                num_requests=num_requests,
+                max_seq_len=args.max_seq_len,
+                num_samples=args.num_samples,
+                ignore_eos=not args.disable_ignore_eos,
+            )
     elif args.input_len is not None and args.output_len is not None:
-        requests: List[APIRequest] = generate_radom_requests(
+        requests = generate_radom_requests(
             tokenizer_name=args.tokenizer,
             max_input_len=args.input_len,
             max_output_len=args.output_len,
@@ -95,11 +109,6 @@ def main(args):
         raise RuntimeError(
             "Invalid configuration: you must either provide a '--dataset'"
             "or specify both '--input-len' and '--output-len' arguments.")
-
-    num_benchmark_reqs = args.num_requests
-    intervals = np.random.exponential(1.0 / args.rate, size=num_requests)
-
-    url = f"http://{args.host}:{args.port}"
 
     # Clear server-side cache before running benchmark.
     clear_cache(url)
@@ -207,6 +216,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ignore-eos", action="store_true")
     parser.add_argument("--print-output-text", action="store_true")
     parser.add_argument("--num-padding-requests", type=int, default=32)
+    parser.add_argument("--use-time", action="store_true")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
