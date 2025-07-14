@@ -269,10 +269,12 @@ impl LLMEngine {
         };
         let num_blocks = block_ids.len();
 
-        self.kv_agent_worker_group
-            .push_kv(peer_names, kv_descs, block_ids)
-            .await
-            .unwrap_or_else(|e| panic!("Failed to push KVs: {e}"));
+        if num_blocks > 0 {
+            self.kv_agent_worker_group
+                .push_kv(peer_names, kv_descs, block_ids)
+                .await
+                .unwrap_or_else(|e| panic!("Failed to push KVs: {e}"));
+        }
 
         {
             self.scheduler

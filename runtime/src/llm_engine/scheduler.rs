@@ -451,13 +451,17 @@ impl Scheduler {
     fn get_log_text(&self) -> String {
         let num_allocated_reqs: usize = self.allocated.len();
         let num_waiting_reqs: usize = self.waiting.len();
-        let kv_block_usage: f32 = self.gpu_block_manager.get_block_usage();
+        let num_pendding_reqs: usize = self.pendding.len();
+        let gpu_kv_block_usage: f32 = self.gpu_block_manager.get_block_usage();
+        let host_kv_block_usage: f32 = self.host_block_manager.get_block_usage();
 
         format!(
-            "Allocated: {} reqs, Waiting: {} reqs, KV cache usage: {:.2} %",
+            "Allocated: {} reqs, Waiting: {} reqs, Pending: {} reqs, GPU KV usage: {:.2} %, Host KV usage: {:.2} %",
             num_allocated_reqs,
             num_waiting_reqs,
-            kv_block_usage * 100.0
+            num_pendding_reqs,
+            gpu_kv_block_usage * 100.0,
+            host_kv_block_usage * 100.0,
         )
     }
 }

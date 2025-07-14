@@ -1,11 +1,11 @@
 use std::cmp::min;
 use std::collections::HashMap;
 
+use linked_hash_set::LinkedHashSet;
 use tracing::warn;
 
 use super::hash::compute_hash;
 use super::sequence::Sequence;
-use utils::collections::FifoSet;
 
 #[derive(PartialEq, Eq, Debug)]
 enum BlockStatus {
@@ -52,12 +52,17 @@ impl Block {
     fn set_hash(&mut self, hash: u64) {
         self.hash = hash;
     }
+
+    fn clear(&mut self) {
+        self.token_ids.clear();
+        self.hash = Default::default();
+    }
 }
 
 struct BlockAllocator {
     num_total_blocks: usize,
     block_pool: Vec<Block>,
-    free_block_ids: FifoSet<u32>,
+    free_block_ids: LinkedHashSet<u32>,
 }
 
 // Make BlockAllocator methods return `Option<T>` instead of panicking.
@@ -66,7 +71,7 @@ impl BlockAllocator {
         let block_pool: Vec<Block> = (0..num_blocks as u32)
             .map(|id| Block::new(id, block_size))
             .collect();
-        let free_block_ids: FifoSet<u32> = block_pool.iter().map(|b| b.id).collect();
+        let free_block_ids: LinkedHashSet<u32> = block_pool.iter().map(|b| b.id).collect();
 
         Self {
             num_total_blocks: num_blocks,
@@ -101,7 +106,7 @@ impl BlockAllocator {
     fn alloc_block(&mut self) -> &mut Block {
         let block_id = self
             .free_block_ids
-            .pop()
+            .pop_front()
             .expect("Cannot allocate block: all blocks are already in use.");
 
         let block = self
@@ -109,12 +114,9 @@ impl BlockAllocator {
             .get_mut(block_id as usize)
             .unwrap_or_else(|| panic!("Block ID {} is out of bounds", block_id));
 
-        if block.status == BlockStatus::Used {
+        if block.status == BlockStatus::Used || block.ref_cnt > 0 {
             panic!("Cannot allocate block {block_id}: alread in used.");
         }
-
-        block.token_ids.clear();
-        block.hash = Default::default();
 
         block.status = BlockStatus::Used;
         block.ref_cnt = 1;
@@ -131,7 +133,10 @@ impl BlockAllocator {
         block.ref_cnt -= 1;
         if block.ref_cnt == 0 {
             block.status = BlockStatus::Free;
-            self.free_block_ids.insert(block_id);
+            assert!(
+                self.free_block_ids.insert(block_id),
+                "Block {block_id} is already exists in free list"
+            );
         }
     }
 
@@ -359,7 +364,10 @@ impl BlockManager {
                 if last_block.get_num_empty_slots() == 0 {
                     let hash = compute_hash(&token_ids[..token_end]);
                     last_block.set_hash(hash);
-                    self.hash_block_table.insert(hash, last_block.id);
+                    let old = self.hash_block_table.insert(hash, last_block.id);
+                    if old.is_some() {
+                        warn!("Hash block table collission occurs");
+                    }
                 }
 
                 num_allocated_slots += num_append_slots;
@@ -377,12 +385,16 @@ impl BlockManager {
                 // so we need to remove the entry of the new block that remains in the hash table
                 self.hash_block_table.remove(&block.get_hash());
 
+                block.clear();
                 block.append_tokens(&mut sub_token_ids.to_vec());
 
                 if block.get_num_empty_slots() == 0 {
                     let hash = compute_hash(&token_ids[..token_end]);
                     block.set_hash(hash);
-                    self.hash_block_table.insert(hash, block.id);
+                    let old = self.hash_block_table.insert(hash, block.id);
+                    if old.is_some() {
+                        warn!("Hash block table collission occurs");
+                    }
                 }
 
                 add_block_ids.push(block.id);
@@ -482,6 +494,7 @@ impl BlockManager {
             }
 
             let block = self.block_allocator.alloc_block();
+            block.clear();
 
             block.append_tokens(&mut sub_token_ids.to_vec());
 
@@ -508,8 +521,11 @@ impl BlockManager {
                 block_ids.push(block_id);
             } else {
                 warn!(
-                    "Session [{}]: Block not found for hash {}. Aborting pinning buffer",
-                    session_id, hash
+                    "Session [{}]: Block not found for hash {}. Aborting pinning buffer ({}/{})",
+                    session_id,
+                    hash,
+                    block_ids.len(),
+                    hash_values.len(),
                 );
                 break;
             }

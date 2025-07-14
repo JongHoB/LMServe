@@ -1,4 +1,3 @@
-pub mod collections;
 pub mod logging;
 pub mod random;
 pub mod signal_handler;
