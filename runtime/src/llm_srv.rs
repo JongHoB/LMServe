@@ -1,0 +1,217 @@
+use std::sync::Arc;
+
+use anyhow::Result;
+use tonic::{Request, Response, Status};
+
+use crate::llm_engine::engine::LLMEngineWrapper;
+use crate::types::EngineKind;
+
+use crate::pb::llm::llm_server::{Llm, LlmServer};
+use crate::pb::llm::{
+    AgentMetadata, EngineStatus, GenerateRequest, GenerateResponse, GetKindResponse,
+    GetStatusResponse, KvAgentMetadata, ReserveRequest, ReserveResponse, TransferKvRequest,
+    TransferKvResponse, TriggerRequest,
+};
+
+pub struct LLMService {
+    kind: EngineKind,
+    engine: Arc<LLMEngineWrapper>,
+}
+
+impl LLMService {
+    pub fn new(kind: EngineKind, engine: Arc<LLMEngineWrapper>) -> Self {
+        Self { kind, engine }
+    }
+
+    pub fn into_server(self) -> LlmServer<Self> {
+        LlmServer::new(self)
+    }
+}
+
+#[tonic::async_trait]
+impl Llm for LLMService {
+    #[allow(unused_variables)]
+    async fn get_kind(&self, request: Request<()>) -> Result<Response<GetKindResponse>, Status> {
+        Ok(Response::new(GetKindResponse {
+            kind: self.kind.to_string(),
+        }))
+    }
+
+    #[allow(unused_variables)]
+    async fn get_status(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<GetStatusResponse>, Status> {
+        let engine_status = self
+            .engine
+            .get_status()
+            .await
+            .expect("Failed to get status");
+
+        let status = EngineStatus {
+            num_running_reqs: engine_status.num_running_reqs as u64,
+            num_allocated_reqs: engine_status.num_allocated_reqs as u64,
+            num_waiting_reqs: engine_status.num_waiting_reqs as u64,
+            num_pendding_reqs: engine_status.num_pendding_reqs as u64,
+            gpu_kv_block_usage: engine_status.gpu_kv_block_usage,
+            host_kv_block_usage: engine_status.host_kv_block_usage,
+        };
+
+        Ok(Response::new(GetStatusResponse {
+            engine_status: Some(status),
+        }))
+    }
+
+    async fn add_remote_kv_agent(
+        &self,
+        request: Request<KvAgentMetadata>,
+    ) -> Result<Response<()>, Status> {
+        let agents = request.into_inner().agents;
+        let kv_agent_metadata = agents
+            .into_iter()
+            .map(|agent| (agent.agent_name, agent.data))
+            .collect();
+
+        self.engine
+            .add_remote_agent(kv_agent_metadata)
+            .await
+            .expect("Failed to add remote kv agent");
+
+        Ok(Response::new(()))
+    }
+
+    async fn generate(
+        &self,
+        request: Request<GenerateRequest>,
+    ) -> Result<Response<GenerateResponse>, Status> {
+        let generate_request = request.into_inner();
+
+        let session_id = generate_request.session_id;
+        let input_ids = generate_request.input_ids;
+        let num_samples = generate_request.num_samples;
+        let max_output_len = generate_request.max_output_len;
+        let ignore_eos = generate_request.ignore_eos;
+
+        let output = self
+            .engine
+            .generate(
+                input_ids,
+                num_samples as u16,
+                session_id,
+                max_output_len.map(|x| x as usize),
+                ignore_eos,
+            )
+            .await
+            .expect("Failed to generate");
+
+        Ok(Response::new(GenerateResponse {
+            session_id: output.session_id,
+            output_ids: output.output_ids,
+            token_latencies: output.token_latencies,
+        }))
+    }
+
+    async fn reserve(
+        &self,
+        request: Request<ReserveRequest>,
+    ) -> Result<Response<ReserveResponse>, Status> {
+        let reserve_request = request.into_inner();
+
+        let session_id = reserve_request.session_id;
+        let input_ids = reserve_request.input_ids;
+        let num_samples = reserve_request.num_samples;
+        let max_output_len = reserve_request.max_output_len;
+        let ignore_eos = reserve_request.ignore_eos;
+
+        let output = self
+            .engine
+            .reserve(
+                input_ids,
+                num_samples as u16,
+                session_id,
+                max_output_len.map(|x| x as usize),
+                ignore_eos,
+            )
+            .await
+            .expect("Failed to reserve request");
+
+        return Ok(Response::new(ReserveResponse {
+            hash_values: output.hash_values,
+            kv_descs: output.kv_descs,
+        }));
+    }
+
+    async fn transfer_kv(
+        &self,
+        request: Request<TransferKvRequest>,
+    ) -> Result<Response<TransferKvResponse>, Status> {
+        let transfer_request = request.into_inner();
+
+        let session_id = transfer_request.session_id;
+        let peer_names = transfer_request.peer_names;
+        let kv_descs = transfer_request.kv_descs;
+        let hash_values = transfer_request.hash_values;
+
+        let output = self
+            .engine
+            .transfer_kv(session_id, peer_names, kv_descs, hash_values)
+            .await
+            .expect("Failed to transfer KV");
+
+        Ok(Response::new(TransferKvResponse {
+            success_hashes: output.hash_values,
+        }))
+    }
+
+    async fn trigger(
+        &self,
+        request: Request<TriggerRequest>,
+    ) -> Result<Response<GenerateResponse>, Status> {
+        let trigger_request = request.into_inner();
+
+        let session_id = trigger_request.session_id;
+        let hash_values = trigger_request.hash_values;
+
+        let output = self
+            .engine
+            .trigger(session_id, hash_values)
+            .await
+            .expect("Failed to trigger");
+
+        Ok(Response::new(GenerateResponse {
+            session_id: output.session_id,
+            output_ids: output.output_ids,
+            token_latencies: output.token_latencies,
+        }))
+    }
+
+    #[allow(unused_variables)]
+    async fn get_kv_agent_metadata(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<KvAgentMetadata>, Status> {
+        let local_agent_metadata = self
+            .engine
+            .get_kv_agent_metadata()
+            .await
+            .expect("Failed to get KV agent metadata");
+
+        // FIXME(jinu)
+        let agents = local_agent_metadata
+            .into_iter()
+            .map(|(agent_name, data)| AgentMetadata { agent_name, data })
+            .collect();
+
+        Ok(Response::new(KvAgentMetadata { agents }))
+    }
+
+    #[allow(unused_variables)]
+    async fn clear_cache(&self, request: Request<()>) -> Result<Response<()>, Status> {
+        self.engine
+            .clear_cache()
+            .await
+            .expect("Failed to clear cache");
+
+        Ok(Response::new(()))
+    }
+}
