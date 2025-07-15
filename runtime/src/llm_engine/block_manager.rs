@@ -275,6 +275,16 @@ impl BlockManager {
         None
     }
 
+    fn check_hash_collision(&self, block_id: u32, token_ids: &[u32]) -> bool {
+        let block = self.block_allocator.get_block(block_id);
+        if block.token_ids != token_ids {
+            warn!("Hash collision occurs: token_ids mismatch detected");
+            false
+        } else {
+            true
+        }
+    }
+
     pub fn get_prefix_cache_blocks(&self, token_ids: &[u32]) -> Vec<u32> {
         let total_token_len = token_ids.len();
 
@@ -290,10 +300,7 @@ impl BlockManager {
             let hash = compute_hash(&token_ids[..token_end]);
 
             if let Some(block_id) = self.lookup_block_id(hash) {
-                let block = self.block_allocator.get_block(block_id);
-                if block.token_ids != sub_token_ids {
-                    warn!("Hash collision on lookup: token_ids mismatch detected");
-                }
+                self.check_hash_collision(block_id, sub_token_ids);
                 block_ids.push(block_id);
             } else {
                 break;
@@ -325,10 +332,7 @@ impl BlockManager {
             let hash = compute_hash(&token_ids[..token_end]);
 
             if let Some(block_id) = self.lookup_block_id(hash) {
-                let block = self.block_allocator.get_block(block_id);
-                if block.token_ids != sub_token_ids {
-                    warn!("Hash collision on lookup: token_ids mismatch detected");
-                }
+                self.check_hash_collision(block_id, sub_token_ids);
                 block_ids.push(block_id);
             } else {
                 break;
@@ -364,9 +368,9 @@ impl BlockManager {
                 if last_block.get_num_empty_slots() == 0 {
                     let hash = compute_hash(&token_ids[..token_end]);
                     last_block.set_hash(hash);
-                    let old = self.hash_block_table.insert(hash, last_block.id);
-                    if old.is_some() {
-                        warn!("Hash block table collission occurs");
+                    if let Some(old_block_id) = self.hash_block_table.insert(hash, last_block.id) {
+                        let block_token_ids = last_block.token_ids.clone();
+                        self.check_hash_collision(old_block_id, &block_token_ids);
                     }
                 }
 
@@ -380,6 +384,7 @@ impl BlockManager {
                 let sub_token_ids = &token_ids[token_offset..token_end];
 
                 let block = self.block_allocator.alloc_block();
+                let block_id = block.id;
 
                 // We are going to refresh (update) the newly allocated block,
                 // so we need to remove the entry of the new block that remains in the hash table
@@ -391,13 +396,12 @@ impl BlockManager {
                 if block.get_num_empty_slots() == 0 {
                     let hash = compute_hash(&token_ids[..token_end]);
                     block.set_hash(hash);
-                    let old = self.hash_block_table.insert(hash, block.id);
-                    if old.is_some() {
-                        warn!("Hash block table collission occurs");
+                    if let Some(old_block_id) = self.hash_block_table.insert(hash, block_id) {
+                        self.check_hash_collision(old_block_id, sub_token_ids);
                     }
                 }
 
-                add_block_ids.push(block.id);
+                add_block_ids.push(block_id);
             }
         }
 
