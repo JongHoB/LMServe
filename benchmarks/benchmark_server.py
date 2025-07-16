@@ -10,6 +10,7 @@ import requests
 from typing import List
 from collections.abc import Callable
 
+from benchmark_utils import save_request_stats
 from generator import (generate_requests, generate_radom_requests,
                        generate_trace, APIRequest, APIResponse,
                        supported_dataset_names)
@@ -27,6 +28,7 @@ async def send_request(url: str, request: APIRequest, pbar):
                 if response.status == 200 or response.status == 201:
                     data = await response.json()
                     end_time = time.time()
+                    data['start_time'] = start_time
                     data['end_time'] = end_time
                     data['latency'] = (end_time - start_time)
                     return APIResponse(**data)
@@ -191,6 +193,9 @@ def main(args):
     print("Second token latency:")
     print("P50: {:.2f} ms, P90: {:.2f} ms, P99: {:.2f} ms".format(
         ttst_tails[0] * 1000, ttst_tails[1] * 1000, ttst_tails[2] * 1000))
+
+    if args.use_time and len(outputs) > 0:
+        save_request_stats(outputs)
 
     if args.print_output_text:
         outputs.sort(key=lambda o: o['output_len'])
