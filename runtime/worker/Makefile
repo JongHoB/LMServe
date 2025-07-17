@@ -7,15 +7,26 @@ PROTO_FILES      := $(addprefix $(PROTO_DIR)/, $(PROTOS))
 PB_FILES         := $(addprefix $(PY_PROTO_OUT_DIR)/, $(PROTOS:.proto=_pb2.py))
 PB_GRPC_FILES    := $(addprefix $(PY_PROTO_OUT_DIR)/, $(PROTOS:.proto=_pb2_grpc.py))
 
+UV 				 := $(shell command -v uv 2>/dev/null)
+
+ifeq ($(UV),)
+    $(info 'uv' not found - falling back to pip.)
+    $(info Hint: Install uv with 'curl -Ls https://astral.sh/uv/install.sh | sh'.)
+    PIP_CMD := pip
+else
+    $(info Found 'uv' at $(UV); using it for installs.)
+    PIP_CMD := $(UV) pip
+endif
+
 .PHONY: install build-dev compile-pb clean check-grpc-tools
 
 install: compile-pb
 	@echo "Installing llm-worker and Python dependencies..."
-	@uv pip install .
+	@$(PIP_CMD) install .
 
 build-dev: compile-pb
-	@echo "Installing llm-worker and Python dependencies..."
-	@uv pip install -e .
+	@echo "Installing llm-worker and Python dependencies (editable)..."
+	@$(PIP_CMD) install -e .
 
 compile-pb: check-grpc-tools $(PB_FILES) $(PB_GRPC_FILES)
 	@touch $(PY_PROTO_OUT_DIR)/__init__.py
