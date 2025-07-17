@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::pb::worker::{BlockMapping, BlockMappingEntry};
 
@@ -103,11 +103,22 @@ impl Scheduler {
         }
     }
 
-    pub fn trigger_pend_task(&mut self, session_id: String) {
+    pub fn trigger_pend_task(&mut self, session_id: String, hash_values: &[u64]) {
         let infer_task = self
             .pendding
             .remove(&session_id)
             .unwrap_or_else(|| panic!("no pending task found for session_id: {}", session_id));
+
+        if !hash_values.is_empty() {
+            let elapsed_time = utils::time::now_ns() - infer_task.get_arrival_time();
+            debug!(
+                "Transferred {} blocks in {} ms",
+                hash_values.len(),
+                elapsed_time / 1_000_000
+            );
+        }
+
+        self.release_buffer(&session_id, hash_values);
 
         let head_seq = infer_task.get_head_seq().expect("No active sequence found");
         self.host_block_manager.update_prefix_cache_blocks(head_seq);

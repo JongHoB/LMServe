@@ -196,8 +196,7 @@ impl LLMEngine {
         {
             let mut scheduler_guard = self.scheduler.lock().await;
 
-            scheduler_guard.release_buffer(&session_id, &hash_values);
-            scheduler_guard.trigger_pend_task(session_id);
+            scheduler_guard.trigger_pend_task(session_id, &hash_values);
         }
 
         Ok(())
