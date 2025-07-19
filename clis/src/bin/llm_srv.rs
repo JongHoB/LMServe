@@ -89,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = Arc::new(
         LLMEngineWrapper::new(
+            group_id,
             args.model_name,
             args.block_size,
             args.gpu_memory_fraction,
@@ -98,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.max_num_batched_tokens,
             args.tp_size,
             worker_group_uds_path,
+            args.nats_uri,
         )
         .await
         .expect("Failed to start API Server"),

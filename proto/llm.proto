@@ -5,9 +5,9 @@ import "google/protobuf/empty.proto";
 package LLM;
 
 service LLM {
-  rpc get_kind(google.protobuf.Empty) returns (GetKindResponse);
+  rpc get_info(google.protobuf.Empty) returns (GetInfoResponse);
 
-  rpc get_status(google.protobuf.Empty) returns (GetStatusResponse);
+  rpc get_stats(google.protobuf.Empty) returns (GetStatusResponse);
 
   rpc get_kv_agent_metadata(google.protobuf.Empty) returns (KVAgentMetadata);
 
@@ -24,11 +24,12 @@ service LLM {
   rpc clear_cache(google.protobuf.Empty) returns (google.protobuf.Empty);
 }
 
-message GetKindResponse {
-  string kind = 1;
+message GetInfoResponse {
+  string id = 1;
+  string kind = 2;
 }
 
-message EngineStatus {
+message EngineStats {
   uint64 num_running_reqs = 1;
   uint64 num_allocated_reqs = 2;
   uint64 num_waiting_reqs = 3;
@@ -38,7 +39,7 @@ message EngineStatus {
 }
 
 message GetStatusResponse {
-  EngineStatus engine_status = 1;
+  EngineStats engine_stats = 1;
 }
 
 message GenerateRequest {

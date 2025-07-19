@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::cmp::Ordering;
+use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,16 +8,19 @@ use anyhow::Result;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tonic::transport::Channel;
-use tracing::debug;
+use tracing::{debug, error, info, warn};
 
+use crate::monitor::StatsMonitor;
 use crate::pb::llm::llm_client::LlmClient;
 use crate::pb::llm::{
     GenerateRequest, GenerateResponse, KvAgentMetadata, ReserveRequest, ReserveResponse,
     TransferKvRequest, TriggerRequest,
 };
+use crate::stats::Stats;
 use crate::types::{EngineKind, RoutePolicy};
 
 struct Node {
+    id: String,
     kind: EngineKind,
     channel: Channel,
     kv_agent_metadata: KvAgentMetadata,
@@ -46,13 +50,15 @@ async fn establish_node(uri: &str) -> Result<Node> {
     };
 
     let mut client = LlmClient::new(channel.clone());
-    let kind_response = client.get_kind(()).await?.into_inner();
-    let kind =
-        EngineKind::from_str(&kind_response.kind).unwrap_or_else(|e| panic!("Invalid kind: {e}"));
+    let info_response = client.get_info(()).await?.into_inner();
 
+    let id = info_response.id;
+    let kind =
+        EngineKind::from_str(&info_response.kind).unwrap_or_else(|e| panic!("Invalid kind: {e}"));
     let kv_agent_metadata = client.get_kv_agent_metadata(()).await?.into_inner();
 
     Ok(Node {
+        id,
         kind,
         channel,
         kv_agent_metadata,
@@ -113,13 +119,15 @@ impl NodeScheduler for RoundRobinNodeScheduler {
 }
 
 struct LoadBalanceNodeScheduler {
-    nodes: Arc<RwLock<Vec<Arc<Node>>>>,
+    node_map: Arc<RwLock<HashMap<String, Arc<Node>>>>,
+    nats_client: async_nats::Client,
 }
 
 impl LoadBalanceNodeScheduler {
-    fn new() -> Self {
+    fn new(nats_client: async_nats::Client) -> Self {
         Self {
-            nodes: Default::default(),
+            node_map: Default::default(),
+            nats_client,
         }
     }
 }
@@ -127,32 +135,37 @@ impl LoadBalanceNodeScheduler {
 #[async_trait::async_trait]
 impl NodeScheduler for LoadBalanceNodeScheduler {
     async fn add_node(&self, node: Node) {
-        self.nodes.write().await.push(Arc::new(node));
+        self.node_map
+            .write()
+            .await
+            .insert(node.id.clone(), Arc::new(node));
     }
 
     #[allow(unused_variables)]
     async fn select(&self, request: &GenerateRequest) -> Result<Arc<Node>> {
-        let nodes_guard = self.nodes.read().await;
+        let node_map_guard = self.node_map.read().await;
 
-        let mut min_index = 0;
-        let mut min_value = f32::INFINITY;
-        for (i, node) in nodes_guard.iter().enumerate() {
-            let mut client = node.connect().await?;
-            let response = client.get_status(()).await?.into_inner();
+        let ids: Vec<String> = node_map_guard.keys().cloned().collect();
+        let payload = serde_json::to_vec(&ids)?;
+        let msg = self
+            .nats_client
+            .request("stats.query.list", payload.into())
+            .await?;
 
-            let value = response
-                .engine_status
-                .map(|status| status.gpu_kv_block_usage)
-                .unwrap_or(0.);
+        let stats_map: HashMap<String, Stats> = serde_json::from_slice(&msg.payload)?;
 
-            if value < min_value {
-                min_index = i;
-                min_value = value;
-            }
-        }
+        let id: &str = stats_map
+            .iter()
+            .min_by(|a, b| {
+                a.1.gpu_kv_block_usage
+                    .partial_cmp(&b.1.gpu_kv_block_usage)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .map(|(id, _)| id)
+            .ok_or_else(|| anyhow::anyhow!("Routing failed: no available nodes"))?;
 
-        let node = nodes_guard
-            .get(min_index)
+        let node = node_map_guard
+            .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Routing failed: no available nodes"))?;
 
@@ -160,19 +173,33 @@ impl NodeScheduler for LoadBalanceNodeScheduler {
     }
 
     async fn get_nodes(&self) -> Vec<Arc<Node>> {
-        let nodes_guard = self.nodes.read().await;
-        nodes_guard.iter().cloned().collect()
+        let node_map_guard = self.node_map.read().await;
+        node_map_guard.values().cloned().collect()
     }
 
     async fn get_num_nodes(&self) -> usize {
-        self.nodes.read().await.len()
+        self.node_map.read().await.len()
     }
 }
 
-fn get_node_scheduler(policy: RoutePolicy) -> Box<dyn NodeScheduler> {
+async fn get_node_scheduler(policy: RoutePolicy, nats_uri: String) -> Box<dyn NodeScheduler> {
     match policy {
         RoutePolicy::RoundRobin => Box::new(RoundRobinNodeScheduler::new()),
-        RoutePolicy::LoadBalance => Box::new(LoadBalanceNodeScheduler::new()),
+        RoutePolicy::LoadBalance => {
+            let nc = match async_nats::connect(&nats_uri).await {
+                Ok(nc) => Some(nc),
+                Err(e) => {
+                    warn!("Failed to connect nats server: {e}");
+                    info!("NATS server connection failed; falling back to Round-Robin scheduler");
+                    None
+                }
+            };
+
+            match nc {
+                Some(nc) => Box::new(LoadBalanceNodeScheduler::new(nc)),
+                None => Box::new(RoundRobinNodeScheduler::new()),
+            }
+        }
     }
 }
 
@@ -181,9 +208,9 @@ struct LlmRouter {
 }
 
 impl LlmRouter {
-    fn new(policy: RoutePolicy) -> Self {
+    async fn new(policy: RoutePolicy, nats_uri: String) -> Self {
         Self {
-            scheduler: get_node_scheduler(policy),
+            scheduler: get_node_scheduler(policy, nats_uri).await,
         }
     }
 
@@ -292,13 +319,23 @@ impl LlmRouter {
 pub struct Controller {
     router: Arc<LlmRouter>,
     prefill_router: Arc<LlmRouter>,
+    monitor: Option<StatsMonitor>,
 }
 
 impl Controller {
-    pub fn new(policy: RoutePolicy) -> Self {
+    pub async fn new(policy: RoutePolicy, nats_uri: String) -> Self {
+        let monitor = match StatsMonitor::start(&nats_uri) {
+            Ok(mon) => Some(mon),
+            Err(e) => {
+                warn!("Failed to connect nats server: {:?}", e);
+                None
+            }
+        };
+
         Self {
-            router: Arc::new(LlmRouter::new(policy)),
-            prefill_router: Arc::new(LlmRouter::new(policy)),
+            router: Arc::new(LlmRouter::new(policy, nats_uri.clone()).await),
+            prefill_router: Arc::new(LlmRouter::new(policy, nats_uri.clone()).await),
+            monitor,
         }
     }
 
@@ -358,5 +395,15 @@ impl Controller {
         self.prefill_router.clear_cache().await?;
 
         Ok(())
+    }
+}
+
+impl Drop for Controller {
+    fn drop(&mut self) {
+        if let Some(mut monitor) = self.monitor.take() {
+            monitor
+                .shutdown()
+                .unwrap_or_else(|e| error!("Failed to shutdown monitor daemon: {:?}", e));
+        }
     }
 }

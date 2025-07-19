@@ -8,9 +8,9 @@ use crate::types::EngineKind;
 
 use crate::pb::llm::llm_server::{Llm, LlmServer};
 use crate::pb::llm::{
-    AgentMetadata, EngineStatus, GenerateRequest, GenerateResponse, GetKindResponse,
-    GetStatusResponse, KvAgentMetadata, ReserveRequest, ReserveResponse, TransferKvRequest,
-    TransferKvResponse, TriggerRequest,
+    AgentMetadata, GenerateRequest, GenerateResponse, GetInfoResponse, GetStatusResponse,
+    KvAgentMetadata, ReserveRequest, ReserveResponse, TransferKvRequest, TransferKvResponse,
+    TriggerRequest,
 };
 
 pub struct LLMService {
@@ -31,34 +31,19 @@ impl LLMService {
 #[tonic::async_trait]
 impl Llm for LLMService {
     #[allow(unused_variables)]
-    async fn get_kind(&self, request: Request<()>) -> Result<Response<GetKindResponse>, Status> {
-        Ok(Response::new(GetKindResponse {
+    async fn get_info(&self, request: Request<()>) -> Result<Response<GetInfoResponse>, Status> {
+        Ok(Response::new(GetInfoResponse {
+            id: self.engine.get_id().await.to_string(),
             kind: self.kind.to_string(),
         }))
     }
 
     #[allow(unused_variables)]
-    async fn get_status(
-        &self,
-        request: Request<()>,
-    ) -> Result<Response<GetStatusResponse>, Status> {
-        let engine_status = self
-            .engine
-            .get_status()
-            .await
-            .expect("Failed to get status");
-
-        let status = EngineStatus {
-            num_running_reqs: engine_status.num_running_reqs as u64,
-            num_allocated_reqs: engine_status.num_allocated_reqs as u64,
-            num_waiting_reqs: engine_status.num_waiting_reqs as u64,
-            num_pendding_reqs: engine_status.num_pendding_reqs as u64,
-            gpu_kv_block_usage: engine_status.gpu_kv_block_usage,
-            host_kv_block_usage: engine_status.host_kv_block_usage,
-        };
+    async fn get_stats(&self, request: Request<()>) -> Result<Response<GetStatusResponse>, Status> {
+        let engine_status = self.engine.get_stats().await.expect("Failed to get status");
 
         Ok(Response::new(GetStatusResponse {
-            engine_status: Some(status),
+            engine_stats: Some(engine_status),
         }))
     }
 

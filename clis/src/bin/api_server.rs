@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     let tokenizer =
         Tokenizer::from_pretrained(&args.model_name, None).expect("Failed to load tokenizer");
 
-    let controller: Controller = Controller::new(args.route_policy);
+    let controller: Controller = Controller::new(args.route_policy, args.nats_uri).await;
     for addr in args.llm_server_addresses.iter() {
         let llm_server_url = format!("http://{}", addr);
         controller

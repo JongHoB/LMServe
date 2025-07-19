@@ -25,6 +25,8 @@ strum_macros = "0.27.1"
 tower = "0.5.2"
 hyper-util = "0.1.15"
 linked_hash_set = "0.1.5"
+async-nats = "0.42.0"
+serde_json.workspace = true
 
 [build-dependencies]
 tonic-build = { workspace = true }

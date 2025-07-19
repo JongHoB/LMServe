@@ -4,17 +4,20 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::join;
 use tokio::sync::{Mutex, Notify};
-use tracing::info;
+use tracing::{info, warn};
+
+use crate::stats::Stats;
 
 use super::Bytes;
 use super::infer_task::InferTask;
-use super::outputs::{EngineStatus, GenerateOutput, ReserveOutput, TransferOutput};
-use super::scheduler::{SchedStatus, Scheduler};
+use super::outputs::{EngineStats, GenerateOutput, ReserveOutput, TransferOutput};
+use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use super::worker::{KVWorkerGroup, ModelWorkerGroup};
 
 #[allow(dead_code)]
 pub struct LLMEngine {
+    id: String,
     model_name: String,
     block_size: usize,
     gpu_memory_fraction: f32,
@@ -28,6 +31,8 @@ pub struct LLMEngine {
     kv_worker_group: KVWorkerGroup,
     kv_agent_worker_group: KVWorkerGroup,
 
+    nats_client: Option<async_nats::Client>,
+
     local_kv_agent_metadata: Vec<(String, Bytes)>,
 
     scheduler: Arc<Mutex<Scheduler>>,
@@ -35,6 +40,7 @@ pub struct LLMEngine {
 
 impl LLMEngine {
     pub async fn new(
+        id: String,
         model_name: String,
         block_size: usize,
         gpu_memory_fraction: f32,
@@ -44,6 +50,7 @@ impl LLMEngine {
         max_num_batched_tokens: usize,
         tp_size: u8,
         worker_group_uds_path: String,
+        nats_uri: String,
     ) -> Result<LLMEngine> {
         let model_worker_group = ModelWorkerGroup::init(tp_size, worker_group_uds_path.clone())
             .await
@@ -81,6 +88,14 @@ impl LLMEngine {
             .await
             .unwrap_or_else(|e| panic!("Failed to initialize KV worker group: {e}"));
 
+        let nats_client = match async_nats::connect(&nats_uri).await {
+            Ok(nc) => Some(nc),
+            Err(e) => {
+                warn!("Failed to connect nats server: {e}");
+                None
+            }
+        };
+
         let local_kv_agent_metadata = kv_agent_worker_group
             .get_local_agent_metadata()
             .await
@@ -95,7 +110,16 @@ impl LLMEngine {
             num_host_blocks as usize,
         );
 
+        // Publish stats to the NATS server for initial engine registration.
+        let stats = scheduler.get_stats();
+        if let Some(nc) = &nats_client {
+            let subject: String = format!("stats.update.{}", id);
+            nc.publish(subject, serde_json::to_vec(&stats)?.into())
+                .await?
+        }
+
         Ok(LLMEngine {
+            id,
             model_name,
             block_size,
             gpu_memory_fraction,
@@ -106,13 +130,26 @@ impl LLMEngine {
             model_worker_group,
             kv_worker_group,
             kv_agent_worker_group,
+            nats_client,
             local_kv_agent_metadata,
             scheduler: Arc::new(Mutex::new(scheduler)),
         })
     }
 
-    async fn get_status(&self) -> SchedStatus {
-        self.scheduler.lock().await.get_status()
+    async fn get_stats(&self) -> Stats {
+        self.scheduler.lock().await.get_stats()
+    }
+
+    async fn publish_stats(&self, stats: Stats) -> Result<()> {
+        match &self.nats_client {
+            Some(nc) => {
+                let subject: String = format!("stats.update.{}", self.id);
+                nc.publish(subject, serde_json::to_vec(&stats)?.into())
+                    .await
+                    .map_err(Into::into)
+            }
+            None => Ok(()),
+        }
     }
 
     async fn add_request(
@@ -203,7 +240,7 @@ impl LLMEngine {
     }
 
     async fn iter(&self) -> Option<Vec<InferTask>> {
-        let (infer_inputs, fetch_block_mappings, write_through_block_mappings) = {
+        let (infer_inputs, fetch_block_mappings, write_through_block_mappings, stats) = {
             // Lock scheduler briefly to check and schedule tasks.
             let mut scheduler_guard = self.scheduler.lock().await;
             if scheduler_guard.is_task_queue_empty() {
@@ -220,20 +257,27 @@ impl LLMEngine {
         let wait_before_execute = !fetch_block_mappings.is_empty();
         let record_after_execute = !write_through_block_mappings.is_empty();
 
-        let (infer_result, transfer_result) = join!(
+        let (infer_result, transfer_result, _) = join!(
             self.model_worker_group
                 .infer(infer_inputs, wait_before_execute, record_after_execute),
             self.kv_worker_group
                 .transfer_kv(fetch_block_mappings, write_through_block_mappings),
+            self.publish_stats(stats),
         );
 
         let infer_outputs =
             infer_result.unwrap_or_else(|e| panic!("Failed to execute worker: {e}"));
         transfer_result.unwrap_or_else(|e| panic!("Failed to transfer KV: {e}"));
 
-        let finished_tasks = { self.scheduler.lock().await.commit(infer_outputs) };
+        let (finished_tasks, stats) = {
+            let mut scheduler_guard = self.scheduler.lock().await;
+            let finished_tasks = scheduler_guard.commit(infer_outputs);
+            let stats = scheduler_guard.get_stats();
+            (finished_tasks, stats)
+        };
 
         if !finished_tasks.is_empty() {
+            let _ = self.publish_stats(stats).await;
             Some(finished_tasks)
         } else {
             None
@@ -315,6 +359,7 @@ pub struct LLMEngineWrapper {
 
 impl LLMEngineWrapper {
     pub async fn new(
+        id: String,
         model_name: String,
         block_size: usize,
         gpu_memory_fraction: f32,
@@ -324,8 +369,10 @@ impl LLMEngineWrapper {
         max_num_batched_tokens: usize,
         tp_size: u8,
         worker_group_uds_path: String,
+        nats_uri: String,
     ) -> Result<LLMEngineWrapper> {
         let llm_engine = LLMEngine::new(
+            id,
             model_name,
             block_size,
             gpu_memory_fraction,
@@ -335,6 +382,7 @@ impl LLMEngineWrapper {
             max_num_batched_tokens,
             tp_size,
             worker_group_uds_path,
+            nats_uri,
         )
         .await?;
 
@@ -345,18 +393,22 @@ impl LLMEngineWrapper {
         })
     }
 
-    pub async fn get_status(&self) -> Result<EngineStatus> {
-        let sched_status = self.engine.get_status().await;
-        let engine_status = EngineStatus {
-            num_running_reqs: sched_status.num_running_reqs,
-            num_allocated_reqs: sched_status.num_allocated_reqs,
-            num_waiting_reqs: sched_status.num_waiting_reqs,
-            num_pendding_reqs: sched_status.num_pendding_reqs,
-            gpu_kv_block_usage: sched_status.gpu_kv_block_usage,
-            host_kv_block_usage: sched_status.host_kv_block_usage,
+    pub async fn get_id(&self) -> &str {
+        &self.engine.id
+    }
+
+    pub async fn get_stats(&self) -> Result<EngineStats> {
+        let stats = self.engine.get_stats().await;
+        let engine_stats = EngineStats {
+            num_running_reqs: stats.num_running_reqs as u64,
+            num_allocated_reqs: stats.num_allocated_reqs as u64,
+            num_waiting_reqs: stats.num_waiting_reqs as u64,
+            num_pendding_reqs: stats.num_pendding_reqs as u64,
+            gpu_kv_block_usage: stats.gpu_kv_block_usage,
+            host_kv_block_usage: stats.host_kv_block_usage,
         };
 
-        Ok(engine_status)
+        Ok(engine_stats)
     }
 
     pub async fn add_remote_agent(

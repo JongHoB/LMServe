@@ -44,6 +44,9 @@ pub struct CLIArgs {
 
     #[arg(long, default_value = "127.0.0.1:8000")]
     pub address: String,
+
+    #[arg(long, default_value = "nats://127.0.0.1:4222")]
+    pub nats_uri: String,
 }
 
 #[derive(Parser, Debug, Serialize, Deserialize)]
@@ -65,6 +68,9 @@ pub struct APIServerArgs {
         default_values_t = vec!["127.0.0.1:7000".to_string()]
     )]
     pub llm_server_addresses: Vec<String>,
+
+    #[arg(long, default_value = "nats://127.0.0.1:4222")]
+    pub nats_uri: String,
 }
 
 #[derive(Parser, Debug, Serialize)]
@@ -104,4 +110,7 @@ pub struct LLMSrvArgs {
 
     #[arg(long, value_delimiter = ' ')]
     pub devices: Option<Vec<u8>>,
+
+    #[arg(long, default_value = "nats://127.0.0.1:4222")]
+    pub nats_uri: String,
 }

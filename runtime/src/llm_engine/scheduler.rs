@@ -1,38 +1,14 @@
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
 
 use tracing::{debug, info};
 
 use crate::pb::worker::{BlockMapping, BlockMappingEntry};
+use crate::stats::Stats;
 
 use super::block_manager::BlockManager;
 use super::infer_task::{InferInput, InferOutput, InferTask};
 use super::sequence::SeqStatus;
 use super::sequence::Sequence;
-
-pub struct SchedStatus {
-    pub num_running_reqs: usize,
-    pub num_allocated_reqs: usize,
-    pub num_waiting_reqs: usize,
-    pub num_pendding_reqs: usize,
-    pub gpu_kv_block_usage: f32,
-    pub host_kv_block_usage: f32,
-}
-
-impl fmt::Display for SchedStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Running: {} seqs, Allocated: {} reqs, Waiting: {} reqs, Pending: {} reqs, GPU KV usage: {:.2} %, Host KV usage: {:.2} %",
-            self.num_running_reqs,
-            self.num_allocated_reqs,
-            self.num_waiting_reqs,
-            self.num_pendding_reqs,
-            self.gpu_kv_block_usage * 100.0,
-            self.host_kv_block_usage * 100.0,
-        )
-    }
-}
 
 struct BatchEntry {
     pub context_len: usize,
@@ -350,7 +326,7 @@ impl Scheduler {
         )
     }
 
-    pub fn schedule(&mut self) -> (Vec<InferInput>, Vec<BlockMapping>, Vec<BlockMapping>) {
+    pub fn schedule(&mut self) -> (Vec<InferInput>, Vec<BlockMapping>, Vec<BlockMapping>, Stats) {
         let mut allocated: VecDeque<InferTask> = VecDeque::new();
 
         while let Some(mut infer_task) = self.allocated.pop_front() {
@@ -394,12 +370,14 @@ impl Scheduler {
 
         self.running_batch = running_batch;
 
+        let stats = self.get_stats();
+
         {
             // Logging
             let now = utils::time::now_ns();
 
             if now > self.last_log_time + 5e9 as u64 {
-                info!("{:}", self.get_status().to_string());
+                info!("{:}", stats.to_string());
                 self.last_log_time = now;
             }
         }
@@ -408,6 +386,7 @@ impl Scheduler {
             infer_inputs,
             fetch_block_mappings,
             write_through_block_mappings,
+            stats,
         )
     }
 
@@ -480,7 +459,7 @@ impl Scheduler {
         self.host_block_manager.clear_cache();
     }
 
-    pub fn get_status(&self) -> SchedStatus {
+    pub fn get_stats(&self) -> Stats {
         let num_running_reqs: usize = self.running_batch.len();
         let num_allocated_reqs: usize = self.allocated.len();
         let num_waiting_reqs: usize = self.waiting.len();
@@ -488,7 +467,7 @@ impl Scheduler {
         let gpu_kv_block_usage: f32 = self.gpu_block_manager.get_block_usage();
         let host_kv_block_usage: f32 = self.host_block_manager.get_block_usage();
 
-        SchedStatus {
+        Stats {
             num_running_reqs,
             num_allocated_reqs,
             num_waiting_reqs,

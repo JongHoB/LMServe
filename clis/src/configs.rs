@@ -21,6 +21,11 @@ default_fn!(default_max_batch_size, usize, 256);
 default_fn!(default_max_seq_len, usize, 4096);
 default_fn!(default_max_num_batched_tokens, usize, 5120);
 default_fn!(default_tp_size, u8, 1);
+default_fn!(
+    default_nats_uri,
+    String,
+    String::from("nats://127.0.0.1:4222")
+);
 
 #[derive(Debug, Deserialize)]
 pub struct LLMCluConfig {
@@ -42,6 +47,9 @@ pub struct APIServerConfig {
 pub struct ControllerConfig {
     #[serde(default = "default_route_policy")]
     pub route_policy: types::RoutePolicy,
+
+    #[serde(default = "default_nats_uri")]
+    pub nats_uri: String,
 }
 
 #[derive(Debug, Deserialize)]

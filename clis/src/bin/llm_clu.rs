@@ -71,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let controller_config = ControllerConfig {
                 route_policy: args.route_policy,
+                nats_uri: args.nats_uri.clone(),
             };
 
             let llm_server_configs = (0..args.num_worker_groups)
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let model_name = config.model_name;
+    let nats_uri = config.controller.nats_uri;
 
     let mut device_offset: u8 = 0;
     let mut llm_servers: Vec<Child> = Vec::with_capacity(config.llm_servers.len() as usize);
@@ -118,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tp_size: llm_server.tp_size,
             address: llm_server.address.clone(),
             devices: Some(devices),
+            nats_uri: nats_uri.clone(),
         };
 
         info!("Launching llm_srv (group_id = {group_id})...");
@@ -141,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         route_policy: config.controller.route_policy,
         address: config.api_server.address,
         llm_server_addresses,
+        nats_uri: nats_uri.clone(),
     };
 
     info!("Launching api_server...");
