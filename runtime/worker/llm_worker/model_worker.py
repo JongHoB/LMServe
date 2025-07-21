@@ -24,6 +24,7 @@ def build_prefill_wrapper(
     head_dim: int,
     page_size: int,
     q_data_type: torch.dtype,
+    workspace_buffer: torch.Tensor,
 ) -> flashinfer.BatchPrefillWithPagedKVCacheWrapper:
 
     seqlens_q: List[int] = []
@@ -44,29 +45,22 @@ def build_prefill_wrapper(
     cu_seqlens_q_tensor = torch.tensor(
         np.cumsum([0] + seqlens_q),
         dtype=torch.int,
-        device='cuda',
-    )
+    ).to('cuda', non_blocking=True)
+
     kv_block_indptrs_tensor = torch.tensor(
         np.cumsum([0] + num_blocks_per_seqs),
         dtype=torch.int,
-        device='cuda',
-    )
+    ).to('cuda', non_blocking=True)
+
     kv_block_indices_tensor = torch.tensor(
         kv_block_indices,
         dtype=torch.int,
-        device='cuda',
-    )
+    ).to('cuda', non_blocking=True)
+
     kv_last_block_lens_tensor = torch.tensor(
         kv_last_block_lens,
         dtype=torch.int,
-        device='cuda',
-    )
-
-    workspace_buffer = torch.empty(
-        128 * 1024 * 1024,
-        dtype=torch.uint8,
-        device="cuda",
-    )
+    ).to('cuda', non_blocking=True)
 
     prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, "NHD")
@@ -94,6 +88,7 @@ def build_decode_wrapper(
     head_dim: int,
     page_size: int,
     q_data_type: torch.dtype,
+    workspace_buffer: torch.Tensor,
 ) -> flashinfer.BatchDecodeWithPagedKVCacheWrapper:
 
     num_blocks_per_seqs: List[int] = []
@@ -112,22 +107,17 @@ def build_decode_wrapper(
     kv_block_indptrs_tensor = torch.tensor(
         np.cumsum([0] + num_blocks_per_seqs),
         dtype=torch.int,
-        device='cuda',
-    )
+    ).to('cuda', non_blocking=True)
+
     kv_block_indices_tensor = torch.tensor(
         kv_block_indices,
         dtype=torch.int,
-        device='cuda',
-    )
+    ).to('cuda', non_blocking=True)
+
     kv_last_block_lens_tensor = torch.tensor(
         kv_last_block_lens,
         dtype=torch.int,
-        device='cuda',
-    )
-
-    workspace_buffer = torch.empty(128 * 1024 * 1024,
-                                   dtype=torch.uint8,
-                                   device="cuda")
+    ).to('cuda', non_blocking=True)
 
     decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
         workspace_buffer, "NHD", use_tensor_cores=True)
@@ -181,6 +171,18 @@ class ModelWorker:
         self.temperature: float = 0.0
 
         self.ctx = cuda.Context.attach()
+
+        self.cuda_stream = cuda.Stream()
+
+        # Import CUDA stream created from pycuda as torch stream.
+        ptr = self.cuda_stream.handle
+        self.torch_stream = torch.cuda.ExternalStream(ptr)
+
+        self.workspace_buffer = torch.empty(
+            128 * 1024 * 1024,
+            dtype=torch.uint8,
+            device="cuda",
+        )
 
     def get_config(self) -> ModelConfig:
         self.model_config.clone()
@@ -253,11 +255,13 @@ class ModelWorker:
                 def pre_hook_fn(mod, input):
                     if self.enable_wait_before_execute:
                         self.kv_worker_handle.model_queue.get()
-                        self.kv_worker_handle.pre_events[i].synchronize()
+                        self.cuda_stream.wait_for_event(
+                            self.kv_worker_handle.pre_events[i])
 
                 def post_hook_fn(mod, input, output):
                     if self.enable_record_after_execute:
-                        self.kv_worker_handle.post_events[i].record()
+                        self.kv_worker_handle.post_events[i].record(
+                            self.cuda_stream)
                         # Put a dummy value to trigger KV transfer
                         self.kv_worker_handle.kv_queue.put(b'')
                 return pre_hook_fn, post_hook_fn
@@ -335,17 +339,20 @@ class ModelWorker:
             seqlens_q.append(seqlen_q)
             seqlens_k.append(seqlen_k)
 
-        flatten_input_ids_tensor = torch.tensor(flatten_input_ids,
-                                                dtype=torch.long,
-                                                device='cuda')
-        position_ids_tensor = torch.tensor(position_ids,
-                                           dtype=torch.int,
-                                           device='cuda')
+        flatten_input_ids_tensor = torch.tensor(
+            flatten_input_ids,
+            dtype=torch.long,
+        ).to('cuda', non_blocking=True)
+
+        position_ids_tensor = torch.tensor(
+            position_ids,
+            dtype=torch.int,
+        ).to('cuda', non_blocking=True)
+
         cu_seqlens_q_tensor = torch.tensor(
             np.cumsum([0] + seqlens_q),
             dtype=torch.int,
-            device='cuda',
-        )
+        ).to('cuda', non_blocking=True)
 
         if self.kv_caches is not None and use_cache is True:
             num_qo_heads = self.model_config.num_heads
@@ -362,6 +369,7 @@ class ModelWorker:
                     head_dim=head_dim,
                     page_size=page_size,
                     q_data_type=q_data_type,
+                    workspace_buffer=self.workspace_buffer,
                 )
             else:
                 prefill_wrapper = None
@@ -374,6 +382,7 @@ class ModelWorker:
                     head_dim=head_dim,
                     page_size=page_size,
                     q_data_type=q_data_type,
+                    workspace_buffer=self.workspace_buffer,
                 )
             else:
                 decode_wrapper = None
@@ -392,17 +401,17 @@ class ModelWorker:
             kv_block_indptrs_tensor = torch.tensor(
                 np.cumsum([0] + num_blocks_per_seqs),
                 dtype=torch.int,
-                device='cuda',
-            )
+            ).to('cuda', non_blocking=True)
+
             kv_block_indices_tensor = torch.tensor(
                 kv_block_indices,
                 dtype=torch.int,
-                device='cuda',)
+            ).to('cuda', non_blocking=True)
+
             kv_last_block_lens_tensor = torch.tensor(
                 kv_last_block_lens,
                 dtype=torch.int,
-                device='cuda',
-            )
+            ).to('cuda', non_blocking=True)
 
             batch_indices, positions = flashinfer.get_batch_indices_positions(
                 cu_seqlens_q_tensor,
@@ -500,9 +509,12 @@ class ModelWorker:
         self.enable_wait_before_execute = wait_before_execute
         self.enable_record_after_execute = record_after_execute
 
-        logits = self.model(input_ids=input_ids,
-                            kv_caches=self.kv_caches if use_cache else None,
-                            input_params=input_params)
+        with torch.cuda.stream(self.torch_stream):
+            logits = self.model(
+                input_ids=input_ids,
+                kv_caches=self.kv_caches if use_cache else None,
+                input_params=input_params,
+            )
 
         next_token_ids_tensor, probs_tensor, all_probs_tensor = sample(
             logits,

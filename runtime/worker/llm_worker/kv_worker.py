@@ -4,7 +4,6 @@ import numpy as np
 import torch.multiprocessing as mp
 import asyncio
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 from nixl._api import nixl_agent
@@ -46,7 +45,6 @@ class KVWorker:
         self,
         name: str,
         params: KVWorkerParams,
-        thread_pool_size: int = 4,
     ):
         num_layers = params.num_layers
         num_gpu_blocks = params.num_gpu_blocks
@@ -114,7 +112,6 @@ class KVWorker:
         self.kv_agent_name = name
         self.kv_agent_metadata = kv_agent.get_agent_metadata()
         self.kv_agent = kv_agent
-        self.thread_pool = ThreadPoolExecutor(max_workers=thread_pool_size)
 
     def fetch(
         self,
@@ -157,7 +154,7 @@ class KVWorker:
             if len(fetch_block_mappings) > 0:
                 for block_mapping in fetch_block_mappings:
                     self.fetch(block_mapping, layer_idx, stream)
-                self.kv_worker_handle.pre_events[layer_idx].record()
+                self.kv_worker_handle.pre_events[layer_idx].record(stream)
 
                 self.kv_worker_handle.model_queue.put(b"")
 
@@ -175,7 +172,7 @@ class KVWorker:
                     await asyncio.sleep(1e-5)
                 self.kv_worker_handle.kv_queue.get()
 
-                self.dtoh_stream.wait_for_event(
+                stream.wait_for_event(
                     self.kv_worker_handle.post_events[layer_idx])
                 for block_mapping in write_through_block_mappings:
                     self.write_through(block_mapping, layer_idx, stream)
@@ -293,4 +290,10 @@ class KVWorker:
 
     def __del__(self):
         self.kv_agent.deregister_memory(self.reg_desc)
+
+        # Release CUDA shared memory
+        del self.gpu_kv_caches
+        torch.cuda.ipc_collect()
+        torch.cuda.empty_cache()
+
         self.ctx.pop()

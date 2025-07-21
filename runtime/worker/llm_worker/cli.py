@@ -120,6 +120,9 @@ class WorkerService(worker_pb2_grpc.WorkerServicer):
             num_host_blocks=kv_worker_params.num_host_blocks,
         )
 
+    def __del__(self):
+        self.kv_worker.join()
+
 
 class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
 
