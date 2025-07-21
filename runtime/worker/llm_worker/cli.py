@@ -11,6 +11,7 @@ import logging
 from loguru import logger
 from google.protobuf.empty_pb2 import Empty
 
+from llm_worker.utils import set_cpu_affinity_for_gpu
 from llm_worker import ModelWorker, KVWorker
 from llm_worker.kv_worker import KVWorkerParams
 from llm_worker.pb import worker_pb2_grpc
@@ -257,6 +258,7 @@ def serve(
     mp.set_start_method("spawn", force=True)
 
     torch.cuda.set_device(device)
+    set_cpu_affinity_for_gpu(device)
 
     logger.info(f"Launching {model_name} model on GPU {device}...")
     worker = ModelWorker(model_name, block_size)

@@ -108,12 +108,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut llm_servers: Vec<Child> = Vec::with_capacity(config.llm_servers.len() as usize);
     for (group_id, llm_server) in config.llm_servers.iter().enumerate() {
         let devices: Vec<u8> = (device_offset..(device_offset + llm_server.tp_size)).collect();
-        let max_num_batched_tokens = match llm_server.kind {
-            types::EngineKind::Prefill => llm_server
-                .max_num_batched_tokens
-                .max(llm_server.max_seq_len),
-            _ => llm_server.max_num_batched_tokens,
-        };
 
         let llm_srv_args = LLMSrvArgs {
             kind: llm_server.kind,
@@ -123,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             host_kv_cache_size: llm_server.host_kv_cache_size,
             max_batch_size: llm_server.max_batch_size,
             max_seq_len: llm_server.max_seq_len,
-            max_num_batched_tokens,
+            max_num_batched_tokens: llm_server.max_num_batched_tokens,
             tp_size: llm_server.tp_size,
             address: llm_server.address.clone(),
             devices: Some(devices),

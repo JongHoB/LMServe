@@ -13,7 +13,7 @@ from llm_worker.models.input_params import InputParams
 from llm_worker.models.sampler import sample
 from llm_worker.ops.cache_ops import copy_blocks
 from llm_worker.pb.worker_pb2 import InferInput, InferOutput
-from llm_worker.dist_utils import init_distributed, deinit_distributed
+from llm_worker.utils import init_distributed, deinit_distributed
 from llm_worker.kv_worker import KVWorkerHandle, KVWorkerParams
 
 
