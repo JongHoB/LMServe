@@ -3,10 +3,12 @@ import pycuda.driver as cuda
 import numpy as np
 import torch.multiprocessing as mp
 import asyncio
+import time
 
 from dataclasses import dataclass
 from typing import List, Tuple, Any
-from nixl._api import nixl_agent
+from nixl._api import nixl_agent, nixl_agent_config
+from concurrent.futures import ThreadPoolExecutor
 
 from llm_worker.pb.worker_pb2 import BlockMapping
 
@@ -45,6 +47,7 @@ class KVWorker:
         self,
         name: str,
         params: KVWorkerParams,
+        num_workers: int = 4,
     ):
         num_layers = params.num_layers
         num_gpu_blocks = params.num_gpu_blocks
@@ -101,9 +104,17 @@ class KVWorker:
         self.dtoh_stream = cuda.Stream()
         self.htod_stream = cuda.Stream()
 
-        kv_agent = nixl_agent(name)
+        # Initialize NIXL agent with a dummy POSIX backend.
+        # This backend is not actively used in the current setup.
+        nixl_config = nixl_agent_config(backends=["POSIX"])
+        kv_agent = nixl_agent(name, nixl_config)
+
+        # Create the actual UCX backend with the specified number of workers.
+        kv_agent.create_backend("UCX", {"num_workers": str(num_workers)})
+
         reg_desc = kv_agent.register_memory(
             self.host_kv_caches_tensor,
+            backends=["UCX"],
         )
         if not reg_desc:
             raise RuntimeError("KV memory registration failed")
@@ -112,6 +123,8 @@ class KVWorker:
         self.kv_agent_name = name
         self.kv_agent_metadata = kv_agent.get_agent_metadata()
         self.kv_agent = kv_agent
+
+        self.nixl_thread_pool = ThreadPoolExecutor(max_workers=num_workers)
 
     def fetch(
         self,
@@ -154,12 +167,13 @@ class KVWorker:
             if len(fetch_block_mappings) > 0:
                 for block_mapping in fetch_block_mappings:
                     self.fetch(block_mapping, layer_idx, stream)
+
+                    # This allows the task to yield execution to other tasks.
+                    await asyncio.sleep(0)
+
                 self.kv_worker_handle.pre_events[layer_idx].record(stream)
 
                 self.kv_worker_handle.model_queue.put(b"")
-
-                # This allows the fetch task to yield execution to other tasks.
-                await asyncio.sleep(0)
 
     async def write_through_kv_blocks(
         self,
@@ -176,6 +190,9 @@ class KVWorker:
                     self.kv_worker_handle.post_events[layer_idx])
                 for block_mapping in write_through_block_mappings:
                     self.write_through(block_mapping, layer_idx, stream)
+
+                    # This allows the task to yield execution to other tasks.
+                    await asyncio.sleep(0)
 
     async def transfer(
         self,
@@ -212,7 +229,24 @@ class KVWorker:
         peer_name: str,
         remote_descs: bytes,
         block_ids: List[int],
-    ) -> None:
+    ) -> bool:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            self.nixl_thread_pool,
+            self._push_kv,
+            peer_name,
+            remote_descs,
+            block_ids,
+        )
+
+        return result
+
+    def _push_kv(
+        self,
+        peer_name: str,
+        remote_descs: bytes,
+        block_ids: List[int],
+    ) -> bool:
         tensors = [self.host_kv_caches_tensor[bid] for bid in block_ids]
 
         local_descs = self.kv_agent.get_xfer_descs(tensors)
@@ -245,7 +279,7 @@ class KVWorker:
             elif state == "DONE":
                 break
             else:
-                await asyncio.sleep(1e-5)
+                time.sleep(1e-5)
 
         return True
 
