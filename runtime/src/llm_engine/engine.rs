@@ -172,9 +172,7 @@ impl LLMEngine {
         }
 
         let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
-        {
-            self.scheduler.lock().await.add(infer_task);
-        }
+        self.scheduler.lock().await.add(infer_task);
 
         Ok(())
     }
@@ -202,10 +200,10 @@ impl LLMEngine {
         let head_seq = seqs.first().expect("No active sequence found");
 
         let (block_ids, hash_values) = {
-            let mut scheduler = self.scheduler.lock().await;
+            let mut scheduler_guard = self.scheduler.lock().await;
 
-            let cached_token_len = scheduler.init_prefix_host_cache_blocks(head_seq);
-            scheduler.reserve_buffer(
+            let cached_token_len = scheduler_guard.init_prefix_host_cache_blocks(head_seq);
+            scheduler_guard.reserve_buffer(
                 &session_id,
                 &input_ids[0..input_token_len - 1],
                 cached_token_len,
@@ -222,19 +220,16 @@ impl LLMEngine {
         };
 
         let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
-        {
-            self.scheduler.lock().await.pend(infer_task);
-        }
+        self.scheduler.lock().await.pend(infer_task);
 
         Ok((kv_descs, hash_values))
     }
 
     async fn trigger_request(&self, session_id: String, hash_values: Vec<u64>) -> Result<()> {
-        {
-            let mut scheduler_guard = self.scheduler.lock().await;
-
-            scheduler_guard.trigger_pend_task(session_id, &hash_values);
-        }
+        self.scheduler
+            .lock()
+            .await
+            .trigger_pend_task(session_id, &hash_values);
 
         Ok(())
     }
@@ -308,12 +303,11 @@ impl LLMEngine {
         kv_descs: Vec<Bytes>,
         hash_values: Vec<u64>,
     ) -> Vec<u64> {
-        let block_ids = {
-            self.scheduler
-                .lock()
-                .await
-                .pin_buffer(&session_id, &hash_values)
-        };
+        let block_ids = self
+            .scheduler
+            .lock()
+            .await
+            .pin_buffer(&session_id, &hash_values);
         let num_blocks = block_ids.len();
 
         if num_blocks > 0 {
@@ -323,12 +317,10 @@ impl LLMEngine {
                 .unwrap_or_else(|e| panic!("Failed to push KVs: {e}"));
         }
 
-        {
-            self.scheduler
-                .lock()
-                .await
-                .release_buffer(&session_id, &hash_values);
-        }
+        self.scheduler
+            .lock()
+            .await
+            .release_buffer(&session_id, &hash_values);
 
         hash_values[0..num_blocks].to_vec()
     }
@@ -430,12 +422,10 @@ impl LLMEngineWrapper {
         ignore_eos: bool,
     ) -> Result<GenerateOutput> {
         let notify = Arc::new(Notify::new());
-        {
-            self.request_events
-                .lock()
-                .await
-                .insert(session_id.clone(), notify.clone());
-        }
+        self.request_events
+            .lock()
+            .await
+            .insert(session_id.clone(), notify.clone());
 
         self.engine
             .add_request(
@@ -449,13 +439,12 @@ impl LLMEngineWrapper {
 
         notify.notified().await;
 
-        let request_output: InferTask = {
-            self.request_outputs
-                .lock()
-                .await
-                .remove(&session_id)
-                .unwrap()
-        };
+        let request_output: InferTask = self
+            .request_outputs
+            .lock()
+            .await
+            .remove(&session_id)
+            .unwrap();
 
         let engine_output = GenerateOutput::from_task(&request_output);
         Ok(engine_output)
@@ -506,12 +495,10 @@ impl LLMEngineWrapper {
         hash_values: Vec<u64>,
     ) -> Result<GenerateOutput> {
         let notify = Arc::new(Notify::new());
-        {
-            self.request_events
-                .lock()
-                .await
-                .insert(session_id.clone(), notify.clone());
-        }
+        self.request_events
+            .lock()
+            .await
+            .insert(session_id.clone(), notify.clone());
 
         self.engine
             .trigger_request(session_id.clone(), hash_values)
@@ -519,13 +506,12 @@ impl LLMEngineWrapper {
 
         notify.notified().await;
 
-        let request_output: InferTask = {
-            self.request_outputs
-                .lock()
-                .await
-                .remove(&session_id)
-                .unwrap()
-        };
+        let request_output: InferTask = self
+            .request_outputs
+            .lock()
+            .await
+            .remove(&session_id)
+            .unwrap();
 
         let engine_output = GenerateOutput::from_task(&request_output);
         Ok(engine_output)
