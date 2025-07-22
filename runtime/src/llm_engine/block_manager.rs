@@ -235,9 +235,9 @@ impl BlockManager {
     }
 
     pub fn get_num_required_blocks(&self, seq: &Sequence) -> usize {
-        let filled_token_len = self.get_filled_token_len(seq.seq_id);
+        let num_allocated_slots = self.get_num_allocated_slots(seq.seq_id);
         let total_token_len = seq.token_ids.len();
-        let num_required_slots = total_token_len.saturating_sub(filled_token_len);
+        let num_required_slots = total_token_len.saturating_sub(num_allocated_slots);
         num_required_slots.div_ceil(self.block_size)
     }
 
