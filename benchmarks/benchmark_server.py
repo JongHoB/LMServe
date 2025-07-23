@@ -10,10 +10,10 @@ import requests
 from typing import List
 from collections.abc import Callable
 
-from benchmark_utils import save_request_stats
+from benchmark_utils import ReqResult, summarize_results, save_results
 from generator import (generate_requests, generate_radom_requests,
                        generate_trace, APIRequest, APIResponse,
-                       supported_dataset_names)
+                       APIResponseWithTime, supported_dataset_names)
 
 background_tasks = set()
 
@@ -26,12 +26,13 @@ async def send_request(url: str, request: APIRequest, pbar):
             async with session.post(f"{url}/generate",
                                     json=request) as response:
                 if response.status == 200 or response.status == 201:
-                    data = await response.json()
+                    data: APIResponse = await response.json()
                     end_time = time.time()
-                    data['start_time'] = start_time
-                    data['end_time'] = end_time
-                    data['latency'] = (end_time - start_time)
-                    return APIResponse(**data)
+                    return APIResponseWithTime(
+                        start_time=start_time,
+                        end_time=end_time,
+                        **data,
+                    )
                 else:
                     print(f"Failed: {response.status}")
         except aiohttp.ClientError as e:
@@ -66,7 +67,7 @@ async def run_client(
 
 
 def clear_cache(url: str):
-    print("Clearing Server-side KV Cache.")
+    print("Clearing server-side KV Cache.")
     requests.post(f"{url}/clear_cache")
     print("Cache cleared successfully.")
 
@@ -115,17 +116,17 @@ def main(args):
     # Clear server-side cache before running benchmark.
     clear_cache(url)
 
-    outputs: APIResponse = []
+    responses: APIResponse = []
 
     start_time = time.time()
     with tqdm.tqdm(total=len(requests)) as pbar:
 
         def callback(future: asyncio.Future):
             pbar.update(1)
-            output = future.result()
+            res = future.result()
             if pbar.n <= num_benchmark_reqs:
-                if output is not None:
-                    outputs.append(output)
+                if res is not None:
+                    responses.append(res)
 
         asyncio.run(
             run_client(
@@ -137,68 +138,22 @@ def main(args):
                 cb=callback,
             ))
 
-    end_time = outputs[-1]['end_time']
+    end_time = responses[-1]['end_time']
     elapsed_time = end_time - start_time
 
     print(f"\nBenchmark time: {elapsed_time:.2f} s")
 
-    print(f"Throughput (request): {len(requests) / elapsed_time:.2f} reqs/s")
+    results = [ReqResult.from_response(r) for r in responses]
 
-    total_num_tokens = sum(len(o['token_ids']) for o in outputs)
-    print(
-        f"Throughput (token): {total_num_tokens / elapsed_time:.2f} tokens/s")
+    benchmark_result = summarize_results(results, elapsed_time)
+    # Print benchmark result
+    benchmark_result.print()
 
-    total_num_output_tokens = sum(o['output_len'] for o in outputs)
-    print("Throughput (output token): "
-          f"{total_num_output_tokens / elapsed_time:.2f} tokens/s")
-
-    avg_req_latency = np.mean([o['latency'] for o in outputs])
-    print(f"Avg request latency: {avg_req_latency:.2f} s")
-
-    avg_norm_token_latency = np.mean(
-        [o['latency'] / o['output_len'] for o in outputs])
-    print("Avg normalized output token latency: "
-          f"{avg_norm_token_latency:.4f} s")
-
-    ttfts = [o['token_latencies'][0] for o in outputs]
-    ttft_tails = np.percentile(
-        ttfts,
-        method="closest_observation",
-        q=[50, 90, 99],
-    )
-    print("TTFT:")
-    print("P50: {:.2f} ms, P90: {:.2f} ms, P99: {:.2f} ms".format(
-        ttft_tails[0] * 1000, ttft_tails[1] * 1000, ttft_tails[2] * 1000))
-
-    tpots = []
-    for o in outputs:
-        tpots += o['token_latencies'][1:]
-    tpot_tails = np.percentile(
-        tpots,
-        method="closest_observation",
-        q=[50, 90, 99],
-    )
-    print("TPOT:")
-    print("P50: {:.2f} ms, P90: {:.2f} ms, P99: {:.2f} ms".format(
-        tpot_tails[0] * 1000, tpot_tails[1] * 1000, tpot_tails[2] * 1000))
-
-    # Time to Second Token
-    ttsts = [o['token_latencies'][1]
-             for o in outputs if len(o['token_latencies']) > 1]
-    ttst_tails = np.percentile(
-        ttsts,
-        method="closest_observation",
-        q=[50, 90, 99],
-    )
-    print("Second token latency:")
-    print("P50: {:.2f} ms, P90: {:.2f} ms, P99: {:.2f} ms".format(
-        ttst_tails[0] * 1000, ttst_tails[1] * 1000, ttst_tails[2] * 1000))
-
-    if args.use_time and len(outputs) > 0:
-        save_request_stats(outputs)
+    if args.result_path is not None and len(results) > 0:
+        save_results(results, benchmark_result, base_dir=args.result_path)
 
     if args.print_output_text:
-        outputs.sort(key=lambda o: o['output_len'])
+        outputs = sorted(responses, key=lambda r: r['output_len'])
         print("Below are the generated text of the processed requests:")
         for i, output in enumerate(outputs):
             print("### Generated output for request {}: {}\n".format(
@@ -222,6 +177,7 @@ if __name__ == "__main__":
     parser.add_argument("--print-output-text", action="store_true")
     parser.add_argument("--num-padding-requests", type=int, default=32)
     parser.add_argument("--use-time", action="store_true")
+    parser.add_argument("--result-path", type=str)
     args = parser.parse_args()
 
     np.random.seed(args.seed)

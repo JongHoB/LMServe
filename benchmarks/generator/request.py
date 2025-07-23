@@ -14,3 +14,12 @@ class APIResponse(TypedDict):
     output_text: str
     output_len: int
     token_latencies: List[float]
+
+
+class APIResponseWithTime(TypedDict):
+    start_time: float = None
+    end_time: float = None
+    token_ids: List[int]
+    output_text: str
+    output_len: int
+    token_latencies: List[float]
