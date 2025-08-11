@@ -8,6 +8,7 @@ use tracing::info;
 
 use runtime::pb::llm::GenerateRequest;
 use runtime::router::Controller;
+use utils::tokenizer::get_tokenizer;
 
 use clis::args::APIServerArgs;
 
@@ -96,7 +97,7 @@ async fn main() -> Result<()> {
     let url = format!("http://{}", socket_addr);
 
     let tokenizer =
-        Tokenizer::from_pretrained(&args.model_name, None).expect("Failed to load tokenizer");
+        get_tokenizer(&args.model_name).unwrap_or_else(|e| panic!("Failed to load tokenizer: {e}"));
 
     let controller: Controller = Controller::new(args.route_policy, args.nats_uri).await;
     for addr in args.llm_server_addresses.iter() {
