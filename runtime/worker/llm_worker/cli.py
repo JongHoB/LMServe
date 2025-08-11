@@ -121,7 +121,10 @@ class WorkerService(worker_pb2_grpc.WorkerServicer):
         )
 
     def __del__(self):
-        self.kv_worker.join()
+        if self.kv_worker is not None:
+            if self.kv_worker.is_alive():
+                self.kv_worker.terminate()
+            self.kv_worker.join()
 
 
 class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):

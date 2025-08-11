@@ -145,6 +145,7 @@ class ModelWorker:
         tokenizer=None,
     ):
         init_distributed()
+        self.ctx = cuda.Context.attach()
 
         self.model_config = ModelConfig(model_name)
         self.model = get_model(self.model_config)
@@ -169,8 +170,6 @@ class ModelWorker:
         self.top_k: int = 1
         self.top_p: float = 0.0
         self.temperature: float = 0.0
-
-        self.ctx = cuda.Context.attach()
 
         self.cuda_stream = cuda.Stream()
 
