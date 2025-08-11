@@ -172,7 +172,13 @@ impl LLMEngine {
         }
 
         let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
-        self.scheduler.lock().await.add(infer_task);
+        let stats = {
+            let mut scheduler_guard = self.scheduler.lock().await;
+            scheduler_guard.add(infer_task);
+            scheduler_guard.get_stats()
+        };
+
+        self.publish_stats(stats).await?;
 
         Ok(())
     }
