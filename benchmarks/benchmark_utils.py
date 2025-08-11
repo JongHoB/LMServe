@@ -268,10 +268,11 @@ def save_request_trace(
                 tpot = res.tpot
 
                 ttft_met = ttft <= ttft_slo
-                tpot_met = tpot <= tpot_slo
+                tpot_met = (tpot is None or tpot <= tpot_slo)
 
                 ttfts.append(ttft)
-                tpots.append(tpot)
+                if tpot is not None:
+                    tpots.append(tpot)
 
                 num_good_reqs += (ttft_met and tpot_met)
                 num_good_ttft += ttft_met
@@ -321,13 +322,19 @@ def summarize_results(
     tpots = [r.tpot for r in results if r.tpot is not None]
     tpot_tails = safe_percentiles(tpots)
 
-    second_tok_lats = [r.second_tok_lat for r in results]
+    second_tok_lats = [
+        r.second_tok_lat for r in results if r.second_tok_lat is not None
+    ]
     second_tok_lat_tails = safe_percentiles(second_tok_lats)
 
-    num_good_reqs = sum(r.ttft <= ttft_slo and r.tpot <= tpot_slo
-                        for r in results)
+    # If the output length is 1, the TPOT value will be None.
+    # In that case, count the request as meeting the SLO.
+    num_good_reqs = sum(
+        r.ttft <= ttft_slo and (r.tpot is None or r.tpot <= tpot_slo)
+        for r in results)
     num_good_ttft = sum(r.ttft <= ttft_slo for r in results)
-    num_good_tpot = sum(r.tpot <= tpot_slo for r in results)
+    num_good_tpot = sum(
+        (r.tpot is None or r.tpot <= tpot_slo) for r in results)
 
     req_gput = num_good_reqs / elapsed_time
     ttft_gput = num_good_ttft / elapsed_time

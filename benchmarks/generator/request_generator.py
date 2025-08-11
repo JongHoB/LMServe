@@ -72,7 +72,7 @@ def generate_requests(
         for data in dataset.to_iterable_dataset():
             input_len = len(data['input_ids'])
             output_len = len(data['output_ids'])
-            if (input_len + output_len) > max_seq_len:
+            if (output_len <= 4) or ((input_len + output_len) > max_seq_len):
                 continue
 
             request = APIRequest(
