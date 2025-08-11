@@ -26,7 +26,7 @@ class OPTPositionalEmbedding(nn.Embedding):
 
 class OPTAttention(nn.Module):
 
-    def __init__(self, config, bias: bool = True):
+    def __init__(self, config):
         super().__init__()
         hidden_size = config.hidden_size
         num_heads = config.num_attention_heads
@@ -48,26 +48,26 @@ class OPTAttention(nn.Module):
 
         self.q_proj = ColumnParallelLinear(
             hidden_size,
-            self.q_size,
-            bias=False,
+            hidden_size,
+            bias=config.enable_bias,
             gather_output=False,
         )
         self.k_proj = ColumnParallelLinear(
             hidden_size,
-            self.kv_size,
-            bias=False,
+            hidden_size,
+            bias=config.enable_bias,
             gather_output=False,
         )
         self.v_proj = ColumnParallelLinear(
             hidden_size,
-            self.kv_size,
-            bias=False,
+            hidden_size,
+            bias=config.enable_bias,
             gather_output=False,
         )
-        self.o_proj = RowParallelLinear(
+        self.out_proj = RowParallelLinear(
             hidden_size,
             hidden_size,
-            bias=False,
+            bias=config.enable_bias,
             input_is_parallel=True,
         )
 
@@ -105,7 +105,7 @@ class OPTDecoderLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = OPTAttention(config, bias=config.enable_bias)
+        self.self_attn = OPTAttention(config)
         self.do_layer_norm_before = config.do_layer_norm_before
         self.activation_fn = ACT2FN[config.activation_function]
 
@@ -114,14 +114,14 @@ class OPTDecoderLayer(nn.Module):
             elementwise_affine=config.layer_norm_elementwise_affine,
         )
         self.fc1 = ColumnParallelLinear(
-            self.embed_dim,
+            self.hidden_size,
             config.ffn_dim,
             bias=config.enable_bias,
             gather_output=False,
         )
         self.fc2 = RowParallelLinear(
             config.ffn_dim,
-            self.embed_dim,
+            self.hidden_size,
             bias=config.enable_bias,
             input_is_parallel=True,
         )
@@ -282,7 +282,7 @@ class OPTForCausalLM(nn.Module):
         self.model = OPTModel(config)
 
         self.lm_head = ColumnParallelLinear(
-            config.hidden_size,
+            config.word_embed_proj_dim,
             config.vocab_size,
             bias=False,
             gather_output=True,
@@ -303,6 +303,7 @@ class OPTForCausalLM(nn.Module):
         indices = cu_output_lens - 1
         hidden_states = hidden_states[indices]
         logits = self.lm_head(hidden_states)
+
         return logits
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -323,4 +324,4 @@ class OPTForCausalLM(nn.Module):
                 tensor_model_parallel_rank,
             )
 
-        self.lm_head.weight.data.copy_(self.model.embed_tokens.weight)
+        self.lm_head.weight.data.copy_(self.model.decoder.embed_tokens.weight)

@@ -2,14 +2,18 @@ import torch
 import os
 import re
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from huggingface_hub import hf_api, snapshot_download
 from safetensors.torch import load_file as load_safetensors
 
 
 def get_layer_type(model, param_name):
-    layer_name = re.sub(r"\.(weight|bias)$", "", param_name)
+    match = re.match(r"^(.*)\.(weight|bias)$", param_name)
+    if not match:
+        raise ValueError(f"Invalid param_name format: {param_name}")
+
+    layer_name, param_type = match.groups()
 
     def rgetattr(obj, attr):
         for name in attr.split('.'):
@@ -18,7 +22,7 @@ def get_layer_type(model, param_name):
 
     layer_type = type(rgetattr(model, layer_name)).__name__
 
-    return layer_type
+    return layer_type, param_type
 
 
 def _get_hf_weight_files(
@@ -87,9 +91,11 @@ def hf_weight_iter(model_name: str):
 def load_weights(
     param: torch.Tensor,
     loaded_weight: torch.Tensor,
-    layer_type: str,
+    layer_types: Tuple[str, str],
     tensor_model_parallel_rank: int,
 ) -> None:
+    layer_type, param_type = layer_types
+
     if layer_type in ["VocabParallelEmbedding", "ColumnParallelLinear"]:
         shard_size = param.shape[0]
         start_idx = tensor_model_parallel_rank * shard_size
@@ -97,10 +103,16 @@ def load_weights(
         loaded_weight = loaded_weight[start_idx:end_idx]
 
     elif layer_type in ["RowParallelLinear"]:
-        shard_size = param.shape[1]
-        start_idx = tensor_model_parallel_rank * shard_size
-        end_idx = (tensor_model_parallel_rank + 1) * shard_size
-        loaded_weight = loaded_weight[:, start_idx:end_idx]
+        if param_type == "bias":
+            shard_size = param.shape[0]
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            loaded_weight = loaded_weight[:, start_idx:end_idx]
+        else:
+            shard_size = param.shape[1]
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            loaded_weight = loaded_weight[start_idx:end_idx]
 
     assert param.shape == loaded_weight.shape, (
         f"Tensor shape mismatch between model and checkpoint: "
