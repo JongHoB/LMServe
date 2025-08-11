@@ -233,7 +233,8 @@ def init_kv_cache(
         address = f"unix://{uds_path}"
         server.add_insecure_port(address)
 
-        logger.debug(f"KV worker is ready and listening on: {address}")
+        logger.info(f"KV worker is ready on GPU {device}")
+        logger.debug(f"KV worker is listening on: {address}")
 
         await server.start()
 
@@ -249,7 +250,7 @@ def init_kv_cache(
 
         await shutdown_event.wait()
 
-        logger.info("Shutting the KV worker.")
+        logger.info(f"Shutting the KV worker for GPU {device}.")
 
     asyncio.run(kv_cache_inner(worker, uds_path))
 
@@ -277,7 +278,8 @@ def serve(
         address = f"unix://{uds_path}"
         server.add_insecure_port(address)
 
-        logger.debug(f"Model worker is ready and listening on: {address}")
+        logger.info(f"Model worker is ready on GPU {device}")
+        logger.debug(f"Model worker is listening on: {address}")
 
         await server.start()
 
@@ -293,7 +295,7 @@ def serve(
 
         await shutdown_event.wait()
 
-        logger.info("Shutting the model worker.")
+        logger.info(f"Shutting the model worker for GPU {device}.")
 
     asyncio.run(serve_inner(worker, uds_path))
 
