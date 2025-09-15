@@ -32,6 +32,8 @@ from llm_worker.pb.worker_pb2 import (
     PushKVResponse,
     PullKVRequest,
     PullKVResponse,
+    SwapKVRequest,
+    SwapKVResponse,
 )
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -100,9 +102,15 @@ class WorkerService(worker_pb2_grpc.WorkerServicer):
     ) -> InitCacheResponse:
         gpu_cache_size = request.gpu_cache_size
         host_cache_size = request.host_cache_size
+        disk_cache_size = request.disk_cache_size
+        disk_cache_path = request.disk_cache_path
 
-        kv_worker_params = self.worker.init_cache(gpu_cache_size,
-                                                  host_cache_size)
+        kv_worker_params = self.worker.init_cache(
+            gpu_cache_size,
+            host_cache_size,
+            disk_cache_size,
+            disk_cache_path,
+        )
 
         kv_uds_path = "{}-kv".format(self.uds_path)
 
@@ -113,11 +121,20 @@ class WorkerService(worker_pb2_grpc.WorkerServicer):
                                    kv_uds_path,
                                ))
         kv_worker.start()
+
+        # Wait until KV worker is ready.
+        while not os.path.exists(kv_uds_path):
+            await asyncio.sleep(0.02)
+
+        channel = grpc.insecure_channel(f'unix://{kv_uds_path}')
+        grpc.channel_ready_future(channel).result()
+
         self.kv_worker = kv_worker
 
         return InitCacheResponse(
             num_gpu_blocks=kv_worker_params.num_gpu_blocks,
             num_host_blocks=kv_worker_params.num_host_blocks,
+            num_disk_blocks=kv_worker_params.num_disk_blocks,
         )
 
     def __del__(self):
@@ -144,6 +161,26 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
                                    write_through_block_mappings)
 
         return KVTransferResponse(success=True)
+
+    async def SwapInKV(
+        self,
+        request: SwapKVRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> SwapKVResponse:
+        block_mappings = request.block_mappings
+        await self.worker.read_kv_blocks(block_mappings)
+
+        return SwapKVResponse(success=True)
+
+    async def SwapOutKV(
+        self,
+        request: SwapKVRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> SwapKVResponse:
+        block_mappings = request.block_mappings
+        await self.worker.write_kv_blocks(block_mappings)
+
+        return SwapKVResponse(success=True)
 
     async def GetLocalAgentMetadata(
         self,

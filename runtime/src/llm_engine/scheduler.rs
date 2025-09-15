@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::pb::worker::{BlockMapping, BlockMappingEntry};
 use crate::stats::Stats;
@@ -11,9 +11,14 @@ use super::sequence::SeqStatus;
 use super::sequence::Sequence;
 
 struct BatchEntry {
-    pub context_len: usize,
     pub chunked: bool,
-    pub caching_context_len: usize,
+}
+
+#[derive(Eq, PartialEq)]
+enum Device {
+    Gpu,
+    Host,
+    Disk,
 }
 
 pub struct Scheduler {
@@ -22,6 +27,7 @@ pub struct Scheduler {
     pub max_num_batched_tokens: usize,
     gpu_block_manager: BlockManager,
     host_block_manager: BlockManager,
+    disk_block_manager: BlockManager,
     watermark_blocks: f32,
     waiting: VecDeque<InferTask>,
     allocated: VecDeque<InferTask>,
@@ -41,6 +47,7 @@ impl Scheduler {
         block_size: usize,
         num_gpu_blocks: usize,
         num_host_blocks: usize,
+        num_disk_blocks: usize,
     ) -> Scheduler {
         Scheduler {
             max_batch_size,
@@ -48,6 +55,7 @@ impl Scheduler {
             max_num_batched_tokens,
             gpu_block_manager: BlockManager::new(block_size, num_gpu_blocks),
             host_block_manager: BlockManager::new(block_size, num_host_blocks),
+            disk_block_manager: BlockManager::new(block_size, num_disk_blocks),
             watermark_blocks: 0.97,
             waiting: VecDeque::new(),
             allocated: VecDeque::new(),
@@ -62,12 +70,49 @@ impl Scheduler {
     }
 
     pub fn add(&mut self, infer_task: InferTask) {
-        let seqs = infer_task.get_active_seqs();
-        for seq in seqs.iter() {
-            self.host_block_manager.init_prefix_cache_blocks(seq);
-        }
-
         self.waiting.push_back(infer_task);
+    }
+
+    fn get_block_manager(&self, device: &Device) -> &BlockManager {
+        match device {
+            Device::Gpu => &self.gpu_block_manager,
+            Device::Host => &self.host_block_manager,
+            Device::Disk => &self.disk_block_manager,
+        }
+    }
+
+    fn get_block_manager_mut(&mut self, device: &Device) -> &mut BlockManager {
+        match device {
+            Device::Gpu => &mut self.gpu_block_manager,
+            Device::Host => &mut self.host_block_manager,
+            Device::Disk => &mut self.disk_block_manager,
+        }
+    }
+
+    pub fn plan_stage(&mut self, infer_task: &InferTask) -> Option<(BlockMapping, Vec<u64>)> {
+        for seq in infer_task.get_active_seqs() {
+            self.host_block_manager.init_prefix_cache_blocks(seq);
+            self.disk_block_manager.init_prefix_cache_blocks(seq);
+        }
+        let head_seq = infer_task.get_head_seq().expect("No active sequence found");
+
+        self.reserve_copy_blocks(
+            &infer_task.get_session_id(),
+            head_seq,
+            Device::Disk,
+            Device::Host,
+        )
+    }
+
+    pub fn backup(&mut self, infer_task: &InferTask) -> Option<(BlockMapping, Vec<u64>)> {
+        let finished_seqs = infer_task.get_seqs(SeqStatus::Finished);
+        let head_finished_seq = finished_seqs.first().expect("No finished sequence found");
+        self.reserve_copy_blocks(
+            &infer_task.get_session_id(),
+            head_finished_seq,
+            Device::Host,
+            Device::Disk,
+        )
     }
 
     pub fn pend(&mut self, infer_task: InferTask) {
@@ -85,15 +130,6 @@ impl Scheduler {
             .remove(&session_id)
             .unwrap_or_else(|| panic!("no pending task found for session_id: {}", session_id));
 
-        if !hash_values.is_empty() {
-            let elapsed_time = utils::time::now_ns() - infer_task.get_arrival_time();
-            debug!(
-                "Transferred {} blocks in {} ms",
-                hash_values.len(),
-                elapsed_time / 1_000_000
-            );
-        }
-
         self.release_buffer(&session_id, hash_values);
 
         let head_seq = infer_task.get_head_seq().expect("No active sequence found");
@@ -102,7 +138,7 @@ impl Scheduler {
         self.add(infer_task);
     }
 
-    fn try_reserve_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
+    fn try_alloc_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
         let mut num_alloc_seqs = 0;
         for seq in infer_task.get_active_seqs_mut() {
             let num_cache_blocks = self
@@ -116,7 +152,7 @@ impl Scheduler {
             {
                 self.gpu_block_manager.init_prefix_cache_blocks(seq);
 
-                self.gpu_block_manager.reserve_blocks(seq);
+                self.gpu_block_manager.alloc_blocks(seq);
                 seq.status = SeqStatus::Allocated;
                 num_alloc_seqs += 1;
             } else {
@@ -132,7 +168,7 @@ impl Scheduler {
         let seqs = infer_task.get_active_seqs_mut();
         for seq in seqs {
             if self.gpu_block_manager.can_alloc_seq(seq, watermark) {
-                self.gpu_block_manager.reserve_blocks(seq);
+                self.gpu_block_manager.alloc_blocks(seq);
                 seq.status = SeqStatus::Allocated;
                 num_alloc_seqs += 1;
             } else {
@@ -148,7 +184,7 @@ impl Scheduler {
         let seqs = infer_task.get_active_seqs();
         for seq in seqs {
             if self.host_block_manager.can_alloc_seq(seq, 1.0) {
-                self.host_block_manager.reserve_blocks(seq);
+                self.host_block_manager.alloc_blocks(seq);
                 num_alloc_seqs += 1;
             } else {
                 break;
@@ -158,18 +194,25 @@ impl Scheduler {
         num_alloc_seqs > 0
     }
 
-    pub fn init_prefix_host_cache_blocks(&mut self, seq: &Sequence) -> usize {
-        self.host_block_manager.init_prefix_cache_blocks(seq)
+    /// Initialize prefix KV cache blocks on the host-side (CPU memory and disk),
+    /// excluding GPU memory.
+    pub fn init_prefix_cache_blocks(&mut self, infer_task: &InferTask) {
+        for seq in infer_task.get_active_seqs() {
+            self.host_block_manager.init_prefix_cache_blocks(seq);
+            self.disk_block_manager.init_prefix_cache_blocks(seq);
+        }
     }
 
-    pub fn reserve_buffer(
-        &mut self,
-        session_id: &str,
-        token_ids: &[u32],
-        start: usize,
-    ) -> (Vec<u32>, Vec<u64>) {
-        self.host_block_manager
-            .reserve_buffer_by_tokens(session_id, token_ids, start)
+    pub fn reserve_buffer(&mut self, infer_task: &InferTask) -> (Vec<u32>, Vec<u64>) {
+        let head_seq = infer_task.get_head_seq().expect("No active sequence found");
+        let host_filled = self
+            .host_block_manager
+            .get_filled_token_len(head_seq.seq_id);
+        self.host_block_manager.reserve_buffer_by_tokens(
+            &infer_task.get_session_id(),
+            head_seq.get_token_ids(),
+            host_filled,
+        )
     }
 
     pub fn pin_buffer(&mut self, session_id: &str, hash_values: &[u64]) -> Vec<u32> {
@@ -182,11 +225,111 @@ impl Scheduler {
             .release_buffer(session_id, hash_values);
     }
 
+    pub fn release_disk_buffer(&mut self, session_id: &str, hash_values: &[u64]) {
+        self.disk_block_manager
+            .release_buffer(session_id, hash_values);
+    }
+
     fn preempt_infer_task(&mut self, infer_task: &mut InferTask) {
         let seqs = infer_task.get_active_seqs_mut();
         for seq in seqs {
             self.gpu_block_manager.free(seq.seq_id);
             seq.status = SeqStatus::Waiting;
+        }
+    }
+
+    fn reserve_copy_blocks(
+        &mut self,
+        session_id: &str,
+        seq: &Sequence,
+        src_dev: Device,
+        dst_dev: Device,
+    ) -> Option<(BlockMapping, Vec<u64>)> {
+        let src_block_manager = self.get_block_manager(&src_dev);
+        let dst_block_manager = self.get_block_manager(&dst_dev);
+
+        let src_filled = src_block_manager.get_filled_token_len(seq.seq_id);
+        let dst_filled = dst_block_manager.get_filled_token_len(seq.seq_id);
+
+        // If the cached tokens in src device has more than dst device,
+        // it makes a block mapping to fetch the remaiing tokens.
+        if src_filled > dst_filled {
+            let (src_block_ids, _) =
+                src_block_manager.get_block_ids_range(seq.seq_id, dst_filled, src_filled);
+
+            let num_required_blocks = src_block_ids.len();
+            if !dst_block_manager.can_alloc_blocks(num_required_blocks, 1.0) {
+                return None;
+            }
+
+            let (dst_block_ids, hash_values) = self
+                .get_block_manager_mut(&dst_dev)
+                .reserve_buffer_by_tokens(
+                    session_id,
+                    &seq.get_token_ids()[..src_filled],
+                    dst_filled,
+                );
+
+            let mut block_entries: Vec<_> =
+                Vec::with_capacity(src_block_ids.len().min(dst_block_ids.len()));
+            for (src_blk_id, dst_blk_id) in src_block_ids.into_iter().zip(dst_block_ids) {
+                block_entries.push(BlockMappingEntry {
+                    src_block_id: src_blk_id,
+                    dst_block_id: dst_blk_id,
+                });
+            }
+
+            Some((
+                BlockMapping {
+                    entries: block_entries,
+                },
+                hash_values,
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn copy_blocks(
+        &self,
+        seq: &Sequence,
+        src_dev: Device,
+        dst_dev: Device,
+    ) -> Option<(BlockMapping, usize)> {
+        let src_block_manager = self.get_block_manager(&src_dev);
+        let dst_block_manager = self.get_block_manager(&dst_dev);
+
+        let src_filled = src_block_manager.get_filled_token_len(seq.seq_id);
+        let dst_filled = dst_block_manager.get_filled_token_len(seq.seq_id);
+
+        let num_dst_allocated_slots = dst_block_manager.get_num_allocated_slots(seq.seq_id);
+        let end = src_filled.min(num_dst_allocated_slots);
+
+        // If the cached tokens in src device has more than dst device,
+        // it makes a block mapping to fetch the remaiing tokens.
+        if end > dst_filled {
+            let (src_block_ids, _) =
+                src_block_manager.get_block_ids_range(seq.seq_id, dst_filled, end);
+            let (dst_block_ids, _) =
+                dst_block_manager.get_block_ids_range(seq.seq_id, dst_filled, end);
+
+            let mut block_entries: Vec<_> =
+                Vec::with_capacity(src_block_ids.len().min(dst_block_ids.len()));
+            for (src_blk_id, dst_blk_id) in src_block_ids.into_iter().zip(dst_block_ids) {
+                block_entries.push(BlockMappingEntry {
+                    src_block_id: src_blk_id,
+                    dst_block_id: dst_blk_id,
+                });
+            }
+
+            Some((
+                BlockMapping {
+                    entries: block_entries,
+                },
+                end,
+            ))
+        } else {
+            None
         }
     }
 
@@ -211,46 +354,20 @@ impl Scheduler {
                 }
 
                 let total = seq.token_ids.len();
-                let filled = {
-                    let gpu_filled = self.gpu_block_manager.get_filled_token_len(seq.seq_id);
-                    let host_filled = self.host_block_manager.get_filled_token_len(seq.seq_id);
 
-                    // If the cached tokens in host memory has more than GPU,
-                    // it makes a block mapping to fetch the remaiing tokens.
-                    if host_filled > gpu_filled {
-                        let (gpu_block_ids, _) = self.gpu_block_manager.get_block_ids_range(
-                            seq.seq_id,
-                            gpu_filled,
-                            host_filled,
-                        );
-                        let (host_block_ids, _) = self.host_block_manager.get_block_ids_range(
-                            seq.seq_id,
-                            gpu_filled,
-                            host_filled,
-                        );
+                if let Some((block_mapping, filled_end)) =
+                    self.copy_blocks(seq, Device::Host, Device::Gpu)
+                {
+                    fetch_block_mappings.push(block_mapping);
+                    self.gpu_block_manager
+                        .update_filled_len(seq.seq_id, filled_end);
+                }
 
-                        let mut block_entries: Vec<_> =
-                            Vec::with_capacity(host_block_ids.len().min(gpu_block_ids.len()));
-                        for (host_blk_id, gpu_blk_id) in
-                            host_block_ids.into_iter().zip(gpu_block_ids)
-                        {
-                            block_entries.push(BlockMappingEntry {
-                                src_block_id: host_blk_id,
-                                dst_block_id: gpu_blk_id,
-                            });
-                        }
-
-                        fetch_block_mappings.push(BlockMapping {
-                            entries: block_entries,
-                        });
-
-                        self.gpu_block_manager
-                            .update_filled_len(seq.seq_id, host_filled);
-                    }
-
-                    // Although all tokens are filled, we use last token to generate an output token.
-                    gpu_filled.max(host_filled).min(total.saturating_sub(1))
-                };
+                // Although all tokens are filled, we use last token to generate an output token.
+                let filled = self
+                    .gpu_block_manager
+                    .get_filled_token_len(seq.seq_id)
+                    .min(total.saturating_sub(1));
 
                 let input_len = total.saturating_sub(filled).min(token_budget);
 
@@ -271,46 +388,20 @@ impl Scheduler {
                     infer_inputs.push(infer_input);
                     token_budget -= input_len;
 
-                    let caching_context_len = {
-                        let host_filled = self.host_block_manager.get_filled_token_len(seq.seq_id);
-                        let num_host_allocated_slots =
-                            self.host_block_manager.get_num_allocated_slots(seq.seq_id);
+                    self.gpu_block_manager
+                        .update_filled_len(seq.seq_id, context_len);
 
-                        let (gpu_block_ids, _) = self.gpu_block_manager.get_block_ids_range(
-                            seq.seq_id,
-                            host_filled,
-                            context_len,
-                        );
-                        let (host_block_ids, _) = self.host_block_manager.get_block_ids_range(
-                            seq.seq_id,
-                            host_filled,
-                            num_host_allocated_slots,
-                        );
-
-                        //  Newly generated tokens on the GPU are immediately written through to host memory
-                        let mut block_entries: Vec<_> =
-                            Vec::with_capacity(gpu_block_ids.len().min(host_block_ids.len()));
-                        for (gpu_blk_id, host_blk_id) in
-                            gpu_block_ids.into_iter().zip(host_block_ids)
-                        {
-                            block_entries.push(BlockMappingEntry {
-                                src_block_id: gpu_blk_id,
-                                dst_block_id: host_blk_id,
-                            });
-                        }
-
-                        write_through_block_mappings.push(BlockMapping {
-                            entries: block_entries,
-                        });
-
-                        context_len.min(num_host_allocated_slots)
-                    };
+                    if let Some((block_mapping, filled_end)) =
+                        self.copy_blocks(seq, Device::Gpu, Device::Host)
+                    {
+                        write_through_block_mappings.push(block_mapping);
+                        self.host_block_manager
+                            .update_filled_len(seq.seq_id, filled_end);
+                    }
 
                     // The entry is required to update the scheduling states
                     let entry = BatchEntry {
-                        context_len,
                         chunked: total > (filled + input_len),
-                        caching_context_len,
                     };
 
                     running_batch.insert(seq.seq_id, entry);
@@ -350,7 +441,7 @@ impl Scheduler {
         }
 
         while let Some(mut infer_task) = self.waiting.pop_front() {
-            if self.try_reserve_infer_task(&mut infer_task, self.watermark_blocks) {
+            if self.try_alloc_infer_task(&mut infer_task, self.watermark_blocks) {
                 for seq in infer_task.get_active_seqs_mut() {
                     seq.status = SeqStatus::Allocated;
                 }
@@ -405,16 +496,10 @@ impl Scheduler {
                     _ => continue,
                 };
 
-                self.gpu_block_manager
-                    .update_filled_len(seq.seq_id, entry.context_len);
-                self.host_block_manager
-                    .update_filled_len(seq.seq_id, entry.caching_context_len);
-
                 if entry.chunked {
                     continue;
                 }
 
-                seq.cached = false;
                 seq.append_output_id(
                     output.output_id,
                     output.prob,
@@ -437,26 +522,24 @@ impl Scheduler {
             }
         }
 
-        for task in finished_tasks.iter() {
-            self.remove_task(task);
-        }
-
         self.allocated = still_allocated_tasks;
         self.running_batch.clear();
 
         finished_tasks
     }
 
-    fn remove_task(&mut self, infer_task: &InferTask) {
+    pub fn remove_task(&mut self, infer_task: &InferTask) {
         for seq in infer_task.get_seqs(SeqStatus::Finished) {
             self.gpu_block_manager.free(seq.seq_id);
             self.host_block_manager.free(seq.seq_id);
+            self.disk_block_manager.free(seq.seq_id);
         }
     }
 
     pub fn clear_cache(&mut self) {
         self.gpu_block_manager.clear_cache();
         self.host_block_manager.clear_cache();
+        self.disk_block_manager.clear_cache();
     }
 
     pub fn get_stats(&self) -> Stats {

@@ -144,7 +144,8 @@ class ModelWorker:
         block_size: int,
         tokenizer=None,
     ):
-        init_distributed()
+        rank, _ = init_distributed()
+        self.rank = rank
         self.ctx = cuda.Context.attach()
 
         self.model_config = ModelConfig(model_name)
@@ -199,7 +200,9 @@ class ModelWorker:
     def init_cache(
         self,
         gpu_cache_size: int,
-        host_cache_size: int = None,
+        host_cache_size: int,
+        disk_cache_size: int,
+        disk_cache_path: str,
     ) -> KVWorkerParams:
         model_config = self.model_config
 
@@ -270,11 +273,10 @@ class ModelWorker:
             layer.register_forward_hook(post_hook)
 
         # Generate KVWorkerParams
-        if host_cache_size is not None:
-            num_host_blocks = (int(host_cache_size) //
-                               (num_layers * 2 * kv_block_size))
-        else:
-            num_host_blocks = 0
+        num_host_blocks = (int(host_cache_size) //
+                           (num_layers * 2 * kv_block_size))
+        num_disk_blocks = (int(disk_cache_size) //
+                           (num_layers * 2 * kv_block_size))
 
         kv_cache_metadata = self.kv_caches.untyped_storage()._share_cuda_()
         pre_event_handles = [
@@ -284,11 +286,15 @@ class ModelWorker:
             e.ipc_handle() for e in self.kv_worker_handle.post_events
         ]
 
+        disk_kv_cache_file = f"{disk_cache_path}/disk-kv-cache-{self.rank}.npy"
+
         kv_worker_params = KVWorkerParams(
             kv_cache_metadata,
             num_layers,
             num_gpu_blocks,
             num_host_blocks,
+            num_disk_blocks,
+            disk_kv_cache_file,
             dtype,
             pre_event_handles,
             post_event_handles,

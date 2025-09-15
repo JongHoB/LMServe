@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::join;
 use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinHandle;
+use tokio::time;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::stats::Stats;
@@ -14,6 +18,99 @@ use super::outputs::{EngineStats, GenerateOutput, ReserveOutput, TransferOutput}
 use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use super::worker::{KVWorkerGroup, ModelWorkerGroup};
+
+type AsyncResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type AsyncTask = JoinHandle<AsyncResult>;
+type AsyncQueue = Arc<Mutex<VecDeque<AsyncTask>>>;
+
+struct Observer {
+    handles: AsyncQueue,
+    cancel: CancellationToken,
+}
+
+impl Default for Observer {
+    fn default() -> Self {
+        Self {
+            handles: AsyncQueue::default(),
+            cancel: CancellationToken::new(),
+        }
+    }
+}
+
+impl Observer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    async fn register(&self, handle: AsyncTask) {
+        self.handles.lock().await.push_back(handle);
+    }
+
+    async fn check_once(&self) -> usize {
+        let mut finished: Vec<AsyncTask> = Vec::new();
+        {
+            let mut q = self.handles.lock().await;
+
+            let mut i = 0;
+            while i < q.len() {
+                if q[i].is_finished() {
+                    finished.push(q.remove(i).unwrap());
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        let mut drained = 0;
+        for h in finished {
+            match h.await {
+                Ok(Ok(())) => drained += 1,
+                Ok(Err(e)) => {
+                    eprintln!("[job error] {e}");
+                    drained += 1;
+                }
+                Err(join_err) => {
+                    eprintln!("[join error] {join_err}");
+                    drained += 1;
+                }
+            }
+        }
+
+        drained
+    }
+
+    fn spawn_loop(self: &Arc<Self>, period: Duration) -> JoinHandle<()> {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = time::interval(period);
+            loop {
+                tokio::select! {
+                    _ = this.cancel.cancelled() => break,
+                    _ = tick.tick() => {
+                        let n = this.check_once().await;
+                        if n>0 {
+                            //
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    pub async fn cancel_all(&self) -> usize{
+        let mut q = self.handles.lock().await;
+        let n = q.len();
+        for h in q.drain(..) {
+            h.abort();
+            let _ = h.await;
+        }
+        n
+    }
+
+    pub fn shutdown(&self) {
+        self.cancel.cancel();
+    }
+}
 
 #[allow(dead_code)]
 pub struct LLMEngine {
@@ -29,6 +126,7 @@ pub struct LLMEngine {
 
     model_worker_group: ModelWorkerGroup,
     kv_worker_group: KVWorkerGroup,
+    kv_disk_worker_group: Arc<KVWorkerGroup>,
     kv_agent_worker_group: KVWorkerGroup,
 
     nats_client: Option<async_nats::Client>,
@@ -36,6 +134,8 @@ pub struct LLMEngine {
     local_kv_agent_metadata: Vec<(String, Bytes)>,
 
     scheduler: Arc<Mutex<Scheduler>>,
+
+    observer: Arc<Observer>,
 }
 
 impl LLMEngine {
@@ -45,6 +145,8 @@ impl LLMEngine {
         block_size: usize,
         gpu_memory_fraction: f32,
         host_cache_size: usize,
+        disk_cache_size: usize,
+        disk_cache_path: String,
         max_batch_size: usize,
         max_seq_len: usize,
         max_num_batched_tokens: usize,
@@ -70,17 +172,33 @@ impl LLMEngine {
 
         // Convert GBs -> Bytes
         let host_cache_size = host_cache_size * (1 << 30);
+        let disk_cache_size = disk_cache_size * (1 << 30);
 
-        let (num_gpu_blocks, num_host_blocks) = model_worker_group
-            .init_cache(cache_size, host_cache_size)
+        let (num_gpu_blocks, num_host_blocks, num_disk_blocks) = model_worker_group
+            .init_cache(
+                cache_size,
+                host_cache_size,
+                disk_cache_size,
+                disk_cache_path.clone(),
+            )
             .await
             .unwrap_or_else(|e| panic!("Failed to init KV cache: {e}"));
         info!("Created {num_gpu_blocks} KV cache blocks on GPU memory.");
         if num_host_blocks > 0 {
             info!("Created {num_host_blocks} KV cache blocks on Host memory.");
         }
+        if num_disk_blocks > 0 {
+            info!(
+                "Created {num_disk_blocks} KV cache blocks on Disk (path={}).",
+                disk_cache_path,
+            );
+        }
 
         let kv_worker_group = KVWorkerGroup::init(tp_size, worker_group_uds_path.clone())
+            .await
+            .unwrap_or_else(|e| panic!("Failed to initialize KV worker group: {e}"));
+
+        let kv_disk_worker_group = KVWorkerGroup::init(tp_size, worker_group_uds_path.clone())
             .await
             .unwrap_or_else(|e| panic!("Failed to initialize KV worker group: {e}"));
 
@@ -108,6 +226,7 @@ impl LLMEngine {
             block_size,
             num_gpu_blocks as usize,
             num_host_blocks as usize,
+            num_disk_blocks as usize,
         );
 
         // Publish stats to the NATS server for initial engine registration.
@@ -117,6 +236,9 @@ impl LLMEngine {
             nc.publish(subject, serde_json::to_vec(&stats)?.into())
                 .await?
         }
+
+        let observer = Observer::new();
+        observer.spawn_loop(Duration::from_millis(200));
 
         Ok(LLMEngine {
             id,
@@ -129,10 +251,12 @@ impl LLMEngine {
             tp_size,
             model_worker_group,
             kv_worker_group,
+            kv_disk_worker_group: Arc::new(kv_disk_worker_group),
             kv_agent_worker_group,
             nats_client,
             local_kv_agent_metadata,
             scheduler: Arc::new(Mutex::new(scheduler)),
+            observer,
         })
     }
 
@@ -160,6 +284,7 @@ impl LLMEngine {
         max_output_len: Option<usize>,
         ignore_eos: bool,
     ) -> Result<()> {
+        let arrival_time = utils::time::now_ns();
         let mut seqs: Vec<Sequence> = Vec::new();
         for _ in 0..num_samples {
             let seq = Sequence::new(
@@ -171,14 +296,41 @@ impl LLMEngine {
             seqs.push(seq);
         }
 
-        let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
-        let stats = {
+        let infer_task = InferTask::new(session_id.clone(), seqs, arrival_time);
+        let (plan, stats) = {
             let mut scheduler_guard = self.scheduler.lock().await;
-            scheduler_guard.add(infer_task);
-            scheduler_guard.get_stats()
+            scheduler_guard.init_prefix_cache_blocks(&infer_task);
+
+            let plan = scheduler_guard.plan_stage(&infer_task);
+
+            match plan {
+                Some(_) => {
+                    scheduler_guard.pend(infer_task);
+                }
+                None => {
+                    scheduler_guard.add(infer_task);
+                }
+            }
+
+            let stats = scheduler_guard.get_stats();
+            (plan, stats)
         };
 
         self.publish_stats(stats).await?;
+
+        if let Some((block_mapping, hash_values)) = plan {
+            let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
+            let scheduler = Arc::clone(&self.scheduler);
+            let handle = tokio::spawn(async move {
+                let _ = kv_disk_worker_group.swap_in_kv(vec![block_mapping]).await;
+                scheduler
+                    .lock()
+                    .await
+                    .trigger_pend_task(session_id, &hash_values);
+                Ok(())
+            });
+            self.observer.register(handle).await;
+        }
 
         Ok(())
     }
@@ -202,19 +354,9 @@ impl LLMEngine {
             seqs.push(seq);
         }
 
-        let input_token_len = input_ids.len();
-        let head_seq = seqs.first().expect("No active sequence found");
+        let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
 
-        let (block_ids, hash_values) = {
-            let mut scheduler_guard = self.scheduler.lock().await;
-
-            let cached_token_len = scheduler_guard.init_prefix_host_cache_blocks(head_seq);
-            scheduler_guard.reserve_buffer(
-                &session_id,
-                &input_ids[0..input_token_len - 1],
-                cached_token_len,
-            )
-        };
+        let (block_ids, hash_values) = self.scheduler.lock().await.reserve_buffer(&infer_task);
 
         let kv_descs: Vec<Bytes> = if block_ids.is_empty() {
             Vec::new()
@@ -225,7 +367,6 @@ impl LLMEngine {
                 .unwrap_or_else(|e| panic!("Failed to get descriptors: {e}"))
         };
 
-        let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
         self.scheduler.lock().await.pend(infer_task);
 
         Ok((kv_descs, hash_values))
@@ -279,6 +420,35 @@ impl LLMEngine {
 
         if !finished_tasks.is_empty() {
             let _ = self.publish_stats(stats).await;
+            for task in finished_tasks.iter() {
+                let session_id = task.get_session_id();
+
+                let backup_plan = {
+                    let mut scheduler_guard = self.scheduler.lock().await;
+                    let plan = scheduler_guard.backup(task);
+                    scheduler_guard.remove_task(task);
+                    plan
+                };
+
+                let (block_mapping, hash_values) = match backup_plan {
+                    Some((bm, hv)) => (bm, hv),
+                    None => continue,
+                };
+
+                let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
+                let scheduler = Arc::clone(&self.scheduler);
+
+                let handle = tokio::spawn(async move {
+                    let _ = kv_disk_worker_group.swap_out_kv(vec![block_mapping]).await;
+                    scheduler
+                        .lock()
+                        .await
+                        .release_disk_buffer(&session_id, &hash_values);
+                    Ok(())
+                });
+
+                self.observer.register(handle).await;
+            }
             Some(finished_tasks)
         } else {
             None
@@ -337,6 +507,7 @@ impl LLMEngine {
                 let mut scheduler_guard = self.scheduler.lock().await;
 
                 if scheduler_guard.is_task_queue_empty() {
+                    let _ = self.observer.cancel_all();
                     scheduler_guard.clear_cache();
                     break;
                 }
@@ -345,6 +516,13 @@ impl LLMEngine {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
         Ok(())
+    }
+}
+
+impl Drop for LLMEngine {
+    fn drop(&mut self) {
+        let _ = self.observer.cancel_all();
+        self.observer.shutdown();
     }
 }
 
@@ -362,6 +540,8 @@ impl LLMEngineWrapper {
         block_size: usize,
         gpu_memory_fraction: f32,
         host_kv_cache_size: usize,
+        disk_kv_cache_size: usize,
+        disk_kv_cache_path: String,
         max_batch_size: usize,
         max_seq_len: usize,
         max_num_batched_tokens: usize,
@@ -375,6 +555,8 @@ impl LLMEngineWrapper {
             block_size,
             gpu_memory_fraction,
             host_kv_cache_size,
+            disk_kv_cache_size,
+            disk_kv_cache_path,
             max_batch_size,
             max_seq_len,
             max_num_batched_tokens,

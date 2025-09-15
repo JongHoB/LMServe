@@ -33,8 +33,6 @@ pub struct Sequence {
     pub append_token_times: Vec<u64>,
 
     pub ignore_eos: bool,
-
-    pub cached: bool,
 }
 
 impl Sequence {
@@ -61,7 +59,6 @@ impl Sequence {
             filled_token_ids: Vec::new(),
             append_token_times: Vec::new(),
             ignore_eos,
-            cached: false,
         }
     }
 

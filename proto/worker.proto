@@ -12,6 +12,8 @@ service Worker {
 
 service KVWorker {
   rpc TransferKV(KVTransferRequest) returns (KVTransferResponse);
+  rpc SwapOutKV(SwapKVRequest) returns (SwapKVResponse);
+  rpc SwapInKV(SwapKVRequest) returns (SwapKVResponse);
   rpc GetLocalAgentMetadata(google.protobuf.Empty) returns (AgentMetadata);
   rpc AddRemoteAgentMetadata(AgentMetadata)
       returns (AddRemoteAgentMetadataResponse);
@@ -59,11 +61,14 @@ message InferResponse { map<uint64, InferOutput> outputs = 1; }
 message InitCacheRequest {
   uint64 gpu_cache_size = 1;
   uint64 host_cache_size = 2;
+  uint64 disk_cache_size = 3;
+  string disk_cache_path = 4;
 }
 
 message InitCacheResponse {
   uint64 num_gpu_blocks = 1;
   uint64 num_host_blocks = 2;
+  uint64 num_disk_blocks = 3;
 }
 
 message BlockMappingEntry {
@@ -74,6 +79,12 @@ message BlockMappingEntry {
 message BlockMapping {
   repeated BlockMappingEntry entries = 2;
 }
+
+message SwapKVRequest {
+  repeated BlockMapping block_mappings = 1;
+}
+
+message SwapKVResponse { bool success = 1; }
 
 message KVTransferRequest {
   repeated BlockMapping fetch_block_mappings = 1;

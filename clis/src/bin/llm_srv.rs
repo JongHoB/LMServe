@@ -87,6 +87,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workers.push(worker);
     }
 
+    let disk_kv_cache_path = format!("{}/group-{}", args.disk_kv_cache_path, group_id);
+    if args.disk_kv_cache_size > 0 {
+        std::fs::create_dir_all(Path::new(&disk_kv_cache_path))?;
+    }
+
     let engine = Arc::new(
         LLMEngineWrapper::new(
             group_id,
@@ -94,6 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.block_size,
             args.gpu_memory_fraction,
             args.host_kv_cache_size,
+            args.disk_kv_cache_size,
+            disk_kv_cache_path,
             args.max_batch_size,
             args.max_seq_len,
             args.max_num_batched_tokens,

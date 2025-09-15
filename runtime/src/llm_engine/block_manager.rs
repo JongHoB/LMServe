@@ -344,7 +344,7 @@ impl BlockManager {
         (block_ids, start + matched_token_len)
     }
 
-    fn alloc_blocks(&mut self, seq: &Sequence) -> usize {
+    pub fn alloc_blocks(&mut self, seq: &Sequence) -> usize {
         let mut num_allocated_slots = self.get_num_allocated_slots(seq.seq_id);
 
         let token_ids = &seq.token_ids;
@@ -564,10 +564,6 @@ impl BlockManager {
     #[allow(dead_code)]
     pub fn get_prefix_cache_token_len(&self, token_ids: &[u32]) -> usize {
         self.get_prefix_cache_blocks(token_ids).len() * self.block_size
-    }
-
-    pub fn reserve_blocks(&mut self, seq: &Sequence) -> usize {
-        self.alloc_blocks(seq)
     }
 
     pub fn update_filled_len(&mut self, seq_id: u64, new_filled_token_len: usize) {

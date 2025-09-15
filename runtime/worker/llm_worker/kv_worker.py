@@ -4,7 +4,9 @@ import numpy as np
 import torch.multiprocessing as mp
 import asyncio
 import time
+import os
 
+from loguru import logger
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 from nixl._api import nixl_agent, nixl_agent_config
@@ -34,11 +36,54 @@ class KVWorkerParams:
     num_layers: int
     num_gpu_blocks: int
     num_host_blocks: int
+    num_disk_blocks: int
+    disk_kv_cache_file: str
     dtype: torch.dtype
     pre_event_handles: List[bytes]
     post_event_handles: List[bytes]
     model_queue: mp.Queue
     kv_queue: mp.Queue
+
+
+def memmap_disk_kv_cache(
+    kv_cache_file: str,
+    shape: Tuple,
+    dtype: np.dtype,
+    mode: str = "r+",
+):
+    need_new = False
+    if os.path.exists(kv_cache_file):
+        try:
+            kv_cache = np.load(kv_cache_file, mmap_mode=mode)
+            if kv_cache.shape != shape or kv_cache.dtype != np.dtype(dtype):
+                logger.warning(
+                    "Disk KV cache config changed "
+                    "(expected shape={} dtype={}, got shape={} dtype={})".
+                    format(kv_cache.shape, kv_cache.dtype, shape,
+                           np.dtype(dtype)))
+                kv_cache._mmap.close()
+                del arr
+                os.remove(kv_cache_file)
+                need_new = True
+            else:
+                return kv_cache
+
+        except Exception as e:
+            logger.warning(f"Failed to load disk KV cache file: {e}")
+            os.remove(kv_cache_file)
+            need_new = True
+
+    else:
+        need_new = True
+
+    if need_new:
+        logger.info(f"Creating new disk kv caches file: {kv_cache_file}")
+        kv_cache = np.lib.format.open_memmap(kv_cache_file,
+                                             mode="w+",
+                                             dtype=dtype,
+                                             shape=shape)
+
+        return kv_cache
 
 
 class KVWorker:
@@ -52,6 +97,8 @@ class KVWorker:
         num_layers = params.num_layers
         num_gpu_blocks = params.num_gpu_blocks
         num_host_blocks = params.num_host_blocks
+        num_disk_blocks = params.num_disk_blocks
+        disk_kv_cache_file = params.disk_kv_cache_file
         torch_dtype = params.dtype
 
         storage = torch.UntypedStorage._new_shared_cuda(
@@ -81,6 +128,14 @@ class KVWorker:
 
         self.host_kv_caches = host_kv_caches
         self.host_kv_caches_tensor = torch.from_numpy(host_kv_caches)
+
+        if num_disk_blocks > 0:
+            disk_kv_caches_shape = (num_disk_blocks, num_layers, block_size)
+            self.disk_kv_caches = memmap_disk_kv_cache(disk_kv_cache_file,
+                                                       disk_kv_caches_shape,
+                                                       np_dtype)
+        else:
+            self.disk_kv_caches = None
 
         pre_events = [
             cuda.Event.from_ipc_handle(handle)
@@ -125,6 +180,45 @@ class KVWorker:
         self.kv_agent = kv_agent
 
         self.nixl_thread_pool = ThreadPoolExecutor(max_workers=num_workers)
+        self.disk_thread_pool = ThreadPoolExecutor(max_workers=num_workers)
+
+    def read(
+        self,
+        block_mappings: List[BlockMapping],
+        layer_idx: int,
+    ) -> None:
+        for block_map in block_mappings:
+            for entry in block_map.entries:
+                self.host_kv_caches[entry.dst_block_id][layer_idx] = (
+                    self.disk_kv_caches[entry.src_block_id][layer_idx])
+
+    def write(
+        self,
+        block_mappings: List[BlockMapping],
+        layer_idx: int,
+    ) -> None:
+        for block_map in block_mappings:
+            for entry in block_map.entries:
+                self.disk_kv_caches[entry.dst_block_id][layer_idx] = (
+                    self.host_kv_caches[entry.src_block_id][layer_idx])
+
+    async def read_kv_blocks(self, block_mappings: List[BlockMapping]):
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(self.disk_thread_pool, self.read,
+                                 block_mappings, i)
+            for i in range(self.num_layers)
+        ]
+        await asyncio.gather(*tasks)
+
+    async def write_kv_blocks(self, block_mappings: List[BlockMapping]):
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(self.disk_thread_pool, self.write,
+                                 block_mappings, i)
+            for i in range(self.num_layers)
+        ]
+        await asyncio.gather(*tasks)
 
     def fetch(
         self,

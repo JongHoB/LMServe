@@ -79,7 +79,7 @@ def set_cpu_affinity_for_gpu(gpu_idx: int):
         f"Set CPU affinity for GPU {gpu_idx}: {pci_bus.cpu_affinity()}")
 
 
-def init_distributed(backend="nccl", ) -> None:
+def init_distributed(backend="nccl", ) -> (int, int):
     """
     Initialize PyTorch distributed environment for parallelism.
     """
@@ -103,6 +103,8 @@ def init_distributed(backend="nccl", ) -> None:
     torch.distributed.all_reduce(torch.zeros(1).cuda())
 
     initialize_model_parallel(world_size)
+
+    return (rank, world_size)
 
 
 def deinit_distributed() -> None:

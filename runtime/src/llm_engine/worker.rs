@@ -14,7 +14,7 @@ use crate::pb::worker::kv_worker_client::KvWorkerClient;
 use crate::pb::worker::worker_client::WorkerClient;
 use crate::pb::worker::{
     AgentMetadata, BlockMapping, GetDescriptorsRequest, InferRequest, InitCacheRequest,
-    KvTransferRequest, PullKvRequest, PushKvRequest, WarmupRequest,
+    KvTransferRequest, PullKvRequest, PushKvRequest, SwapKvRequest, WarmupRequest,
 };
 
 use super::Bytes;
@@ -139,13 +139,16 @@ impl ModelWorker {
         Ok(outputs)
     }
 
-    async fn init_cache(&self, request: InitCacheRequest) -> Result<(u64, u64)> {
+    async fn init_cache(&self, request: InitCacheRequest) -> Result<(u64, u64, u64)> {
         let mut client = self.connect();
         let response = client.init_cache(request).await?;
         let response = response.into_inner();
+
         let num_gpu_blocks = response.num_gpu_blocks;
         let num_host_blocks = response.num_host_blocks;
-        Ok((num_gpu_blocks, num_host_blocks))
+        let num_disk_blocks = response.num_disk_blocks;
+
+        Ok((num_gpu_blocks, num_host_blocks, num_disk_blocks))
     }
 }
 
@@ -153,6 +156,18 @@ impl KVWorker {
     async fn transfer_kv(&self, request: KvTransferRequest) -> Result<()> {
         let mut client = self.connect();
         let _ = client.transfer_kv(request).await?;
+        Ok(())
+    }
+
+    async fn swap_in_kv(&self, request: SwapKvRequest) -> Result<()> {
+        let mut client = self.connect();
+        let _ = client.swap_in_kv(request).await?;
+        Ok(())
+    }
+
+    async fn swap_out_kv(&self, request: SwapKvRequest) -> Result<()> {
+        let mut client = self.connect();
+        let _ = client.swap_out_kv(request).await?;
         Ok(())
     }
 
@@ -368,10 +383,14 @@ impl ModelWorkerGroup {
         &self,
         gpu_cache_size: usize,
         host_cache_size: usize,
-    ) -> Result<(u64, u64)> {
+        disk_cache_size: usize,
+        disk_cache_path: String,
+    ) -> Result<(u64, u64, u64)> {
         let request = InitCacheRequest {
             gpu_cache_size: gpu_cache_size as u64,
             host_cache_size: host_cache_size as u64,
+            disk_cache_size: disk_cache_size as u64,
+            disk_cache_path,
         };
         let outputs = self
             .run_workers_gather(request, move |worker, request| async move {
@@ -379,10 +398,10 @@ impl ModelWorkerGroup {
             })
             .await?;
 
-        let (num_gpu_blocks, num_host_blocks) =
+        let (num_gpu_blocks, num_host_blocks, num_disk_blocks) =
             extract_if_all_equal(&outputs).expect("Error: not all values are equal");
 
-        Ok((num_gpu_blocks, num_host_blocks))
+        Ok((num_gpu_blocks, num_host_blocks, num_disk_blocks))
     }
 
     pub async fn infer(
@@ -437,6 +456,30 @@ impl KVWorkerGroup {
         let _ = self
             .run_workers_gather(request, move |worker, request| async move {
                 worker.transfer_kv(request).await
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn swap_in_kv(&self, block_mappings: Vec<BlockMapping>) -> Result<()> {
+        let request = SwapKvRequest { block_mappings };
+
+        let _ = self
+            .run_workers_gather(request, move |worker, request| async move {
+                worker.swap_in_kv(request).await
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn swap_out_kv(&self, block_mappings: Vec<BlockMapping>) -> Result<()> {
+        let request = SwapKvRequest { block_mappings };
+
+        let _ = self
+            .run_workers_gather(request, move |worker, request| async move {
+                worker.swap_out_kv(request).await
             })
             .await?;
 

@@ -2,7 +2,7 @@ use hf_hub::api::sync::Api;
 use tokenizers::tokenizer::{Result, Tokenizer};
 
 pub fn get_tokenizer(tokenizer_name: &str) -> Result<Tokenizer> {
-    match Tokenizer::from_pretrained(&tokenizer_name, None) {
+    match Tokenizer::from_pretrained(tokenizer_name, None) {
         Ok(tokenizer) => Ok(tokenizer),
         Err(_) => {
             let api = Api::new()

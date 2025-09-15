@@ -27,6 +27,12 @@ pub struct CLIArgs {
     #[arg(long, default_value_t = configs::default_host_kv_cache_size())]
     pub host_kv_cache_size: usize,
 
+    #[arg(long, default_value_t = configs::default_disk_kv_cache_size())]
+    pub disk_kv_cache_size: usize,
+
+    #[arg(long, default_value_t = configs::default_disk_kv_cache_path())]
+    pub disk_kv_cache_path: String,
+
     #[arg(long, default_value_t = configs::default_max_batch_size())]
     pub max_batch_size: usize,
 
@@ -92,6 +98,12 @@ pub struct LLMSrvArgs {
     // Host-side KV cache size in GB
     #[arg(long, default_value_t = configs::default_host_kv_cache_size())]
     pub host_kv_cache_size: usize,
+
+    #[arg(long, default_value_t = configs::default_disk_kv_cache_size())]
+    pub disk_kv_cache_size: usize,
+
+    #[arg(long, default_value_t = configs::default_disk_kv_cache_path())]
+    pub disk_kv_cache_path: String,
 
     #[arg(long, default_value_t = configs::default_max_batch_size())]
     pub max_batch_size: usize,
