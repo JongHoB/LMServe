@@ -309,6 +309,7 @@ impl LlmRouter {
         };
         let trg_req = TriggerRequest {
             session_id: session_id.clone(),
+            region_id: reserve_res.region_id,
             hash_values: success_hashes,
         };
 

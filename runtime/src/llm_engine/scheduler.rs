@@ -5,7 +5,7 @@ use tracing::info;
 use crate::pb::worker::{BlockMapping, BlockMappingEntry};
 use crate::stats::Stats;
 
-use super::block_manager::BlockManager;
+use super::block_manager::{BlockManager, BlockRegion};
 use super::infer_task::{InferInput, InferOutput, InferTask};
 use super::sequence::SeqStatus;
 use super::sequence::Sequence;
@@ -14,11 +14,31 @@ struct BatchEntry {
     pub chunked: bool,
 }
 
-#[derive(Eq, PartialEq)]
-enum Device {
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub enum Device {
     Gpu,
     Host,
     Disk,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceBlockRegion {
+    device: Device,
+    block_region: BlockRegion,
+}
+
+impl DeviceBlockRegion {
+    pub fn region_id(&self) -> &str {
+        self.block_region.id()
+    }
+
+    pub fn block_ids(&self) -> &[u32] {
+        self.block_region.block_ids()
+    }
+
+    pub fn hashes(&self) -> &[u64] {
+        self.block_region.hashes()
+    }
 }
 
 pub struct Scheduler {
@@ -89,30 +109,22 @@ impl Scheduler {
         }
     }
 
-    pub fn plan_stage(&mut self, infer_task: &InferTask) -> Option<(BlockMapping, Vec<u64>)> {
-        for seq in infer_task.get_active_seqs() {
-            self.host_block_manager.init_prefix_cache_blocks(seq);
-            self.disk_block_manager.init_prefix_cache_blocks(seq);
-        }
-        let head_seq = infer_task.get_head_seq().expect("No active sequence found");
+    pub fn plan_stage(
+        &mut self,
+        infer_task: &InferTask,
+    ) -> Option<(DeviceBlockRegion, BlockMapping)> {
+        self.init_prefix_cache_blocks(infer_task, &[Device::Host, Device::Disk]);
 
-        self.reserve_copy_blocks(
-            &infer_task.get_session_id(),
-            head_seq,
-            Device::Disk,
-            Device::Host,
-        )
+        let head_seq = infer_task.get_head_seq().expect("No active sequence found");
+        // TODO(jinu): Add logic to determine if staging is required for this request.
+        self.reserve_copy_blocks(head_seq, Device::Disk, Device::Host)
     }
 
-    pub fn backup(&mut self, infer_task: &InferTask) -> Option<(BlockMapping, Vec<u64>)> {
+    pub fn backup(&mut self, infer_task: &InferTask) -> Option<(DeviceBlockRegion, BlockMapping)> {
         let finished_seqs = infer_task.get_seqs(SeqStatus::Finished);
         let head_finished_seq = finished_seqs.first().expect("No finished sequence found");
-        self.reserve_copy_blocks(
-            &infer_task.get_session_id(),
-            head_finished_seq,
-            Device::Host,
-            Device::Disk,
-        )
+
+        self.reserve_copy_blocks(head_finished_seq, Device::Host, Device::Disk)
     }
 
     pub fn pend(&mut self, infer_task: InferTask) {
@@ -124,13 +136,21 @@ impl Scheduler {
         }
     }
 
-    pub fn trigger_pend_task(&mut self, session_id: String, hash_values: &[u64]) {
+    pub fn trigger_pend_task(
+        &mut self,
+        session_id: String,
+        region_id: Option<String>,
+        hash_values: &[u64],
+    ) {
         let infer_task = self
             .pendding
             .remove(&session_id)
             .unwrap_or_else(|| panic!("no pending task found for session_id: {}", session_id));
 
-        self.release_buffer(&session_id, hash_values);
+        if let Some(region_id) = region_id {
+            self.host_block_manager
+                .activate_reserved_blocks(&region_id, hash_values);
+        }
 
         let head_seq = infer_task.get_head_seq().expect("No active sequence found");
         self.host_block_manager.update_prefix_cache_blocks(head_seq);
@@ -138,21 +158,21 @@ impl Scheduler {
         self.add(infer_task);
     }
 
-    fn try_alloc_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
+    fn try_alloc_infer_task(
+        &mut self,
+        infer_task: &mut InferTask,
+        watermark: f32,
+        device: Device,
+    ) -> bool {
         let mut num_alloc_seqs = 0;
+        let block_manager = self.get_block_manager_mut(&device);
         for seq in infer_task.get_active_seqs_mut() {
-            let num_cache_blocks = self
-                .gpu_block_manager
-                .get_num_prefix_cache_blocks(&seq.token_ids);
-            let num_required_blocks =
-                self.gpu_block_manager.get_num_required_blocks(seq) - num_cache_blocks;
-            if self
-                .gpu_block_manager
-                .can_alloc_blocks(num_required_blocks, watermark)
-            {
-                self.gpu_block_manager.init_prefix_cache_blocks(seq);
+            let num_cache_blocks = block_manager.get_num_prefix_cache_blocks(&seq.token_ids);
+            let num_required_blocks = block_manager.get_num_required_blocks(seq) - num_cache_blocks;
+            if block_manager.can_alloc_blocks(num_required_blocks, watermark) {
+                block_manager.init_prefix_cache_blocks(seq);
 
-                self.gpu_block_manager.alloc_blocks(seq);
+                block_manager.alloc_blocks(seq);
                 seq.status = SeqStatus::Allocated;
                 num_alloc_seqs += 1;
             } else {
@@ -163,28 +183,20 @@ impl Scheduler {
         num_alloc_seqs > 0
     }
 
-    fn try_extend_infer_task(&mut self, infer_task: &mut InferTask, watermark: f32) -> bool {
-        let mut num_alloc_seqs = 0;
-        let seqs = infer_task.get_active_seqs_mut();
-        for seq in seqs {
-            if self.gpu_block_manager.can_alloc_seq(seq, watermark) {
-                self.gpu_block_manager.alloc_blocks(seq);
-                seq.status = SeqStatus::Allocated;
-                num_alloc_seqs += 1;
-            } else {
-                break;
-            }
-        }
-
-        num_alloc_seqs > 0
-    }
-
-    fn try_extend_host_infer_task(&mut self, infer_task: &InferTask) -> bool {
+    fn try_extend_infer_task(
+        &mut self,
+        infer_task: &InferTask,
+        watermark: f32,
+        device: Device,
+    ) -> bool {
         let mut num_alloc_seqs = 0;
         let seqs = infer_task.get_active_seqs();
+
+        let block_manager = self.get_block_manager_mut(&device);
+
         for seq in seqs {
-            if self.host_block_manager.can_alloc_seq(seq, 1.0) {
-                self.host_block_manager.alloc_blocks(seq);
+            if block_manager.can_alloc_seq(seq, watermark) {
+                block_manager.alloc_blocks(seq);
                 num_alloc_seqs += 1;
             } else {
                 break;
@@ -194,40 +206,52 @@ impl Scheduler {
         num_alloc_seqs > 0
     }
 
-    /// Initialize prefix KV cache blocks on the host-side (CPU memory and disk),
-    /// excluding GPU memory.
-    pub fn init_prefix_cache_blocks(&mut self, infer_task: &InferTask) {
+    pub fn init_prefix_cache_blocks(&mut self, infer_task: &InferTask, devices: &[Device]) {
         for seq in infer_task.get_active_seqs() {
-            self.host_block_manager.init_prefix_cache_blocks(seq);
-            self.disk_block_manager.init_prefix_cache_blocks(seq);
+            for device in devices {
+                self.get_block_manager_mut(device)
+                    .init_prefix_cache_blocks(seq);
+            }
         }
     }
 
-    pub fn reserve_buffer(&mut self, infer_task: &InferTask) -> (Vec<u32>, Vec<u64>) {
+    pub fn reserve_blocks(
+        &mut self,
+        infer_task: &InferTask,
+        device: Device,
+    ) -> Option<DeviceBlockRegion> {
         let head_seq = infer_task.get_head_seq().expect("No active sequence found");
-        let host_filled = self
-            .host_block_manager
-            .get_filled_token_len(head_seq.seq_id);
-        self.host_block_manager.reserve_buffer_by_tokens(
-            &infer_task.get_session_id(),
-            head_seq.get_token_ids(),
-            host_filled,
-        )
+
+        let block_manager = self.get_block_manager_mut(&device);
+        let filled = block_manager.get_filled_token_len(head_seq.seq_id);
+
+        block_manager
+            .reserve_blocks(head_seq.get_token_ids(), filled)
+            .map(|region| DeviceBlockRegion {
+                device,
+                block_region: region,
+            })
     }
 
-    pub fn pin_buffer(&mut self, session_id: &str, hash_values: &[u64]) -> Vec<u32> {
-        self.host_block_manager
-            .pin_buffer_by_hashes(session_id, hash_values)
+    pub fn commit_reserved_blocks(&mut self, block_region: DeviceBlockRegion) -> usize {
+        self.get_block_manager_mut(&block_region.device)
+            .activate_reserved_blocks(block_region.region_id(), block_region.hashes())
     }
 
-    pub fn release_buffer(&mut self, session_id: &str, hash_values: &[u64]) {
-        self.host_block_manager
-            .release_buffer(session_id, hash_values);
+    pub fn pin_blocks(&mut self, hash_values: &[u64], device: Device) -> DeviceBlockRegion {
+        let block_region = self
+            .get_block_manager_mut(&device)
+            .pin_blocks_by_hashes(hash_values);
+
+        DeviceBlockRegion {
+            device,
+            block_region,
+        }
     }
 
-    pub fn release_disk_buffer(&mut self, session_id: &str, hash_values: &[u64]) {
-        self.disk_block_manager
-            .release_buffer(session_id, hash_values);
+    pub fn unpin_blocks(&mut self, block_region: DeviceBlockRegion) {
+        self.get_block_manager_mut(&block_region.device)
+            .unpin_blocks(block_region.region_id());
     }
 
     fn preempt_infer_task(&mut self, infer_task: &mut InferTask) {
@@ -240,54 +264,50 @@ impl Scheduler {
 
     fn reserve_copy_blocks(
         &mut self,
-        session_id: &str,
         seq: &Sequence,
         src_dev: Device,
         dst_dev: Device,
-    ) -> Option<(BlockMapping, Vec<u64>)> {
+    ) -> Option<(DeviceBlockRegion, BlockMapping)> {
         let src_block_manager = self.get_block_manager(&src_dev);
         let dst_block_manager = self.get_block_manager(&dst_dev);
 
         let src_filled = src_block_manager.get_filled_token_len(seq.seq_id);
         let dst_filled = dst_block_manager.get_filled_token_len(seq.seq_id);
 
-        // If the cached tokens in src device has more than dst device,
-        // it makes a block mapping to fetch the remaiing tokens.
-        if src_filled > dst_filled {
-            let (src_block_ids, _) =
-                src_block_manager.get_block_ids_range(seq.seq_id, dst_filled, src_filled);
-
-            let num_required_blocks = src_block_ids.len();
-            if !dst_block_manager.can_alloc_blocks(num_required_blocks, 1.0) {
-                return None;
-            }
-
-            let (dst_block_ids, hash_values) = self
-                .get_block_manager_mut(&dst_dev)
-                .reserve_buffer_by_tokens(
-                    session_id,
-                    &seq.get_token_ids()[..src_filled],
-                    dst_filled,
-                );
-
-            let mut block_entries: Vec<_> =
-                Vec::with_capacity(src_block_ids.len().min(dst_block_ids.len()));
-            for (src_blk_id, dst_blk_id) in src_block_ids.into_iter().zip(dst_block_ids) {
-                block_entries.push(BlockMappingEntry {
-                    src_block_id: src_blk_id,
-                    dst_block_id: dst_blk_id,
-                });
-            }
-
-            Some((
-                BlockMapping {
-                    entries: block_entries,
-                },
-                hash_values,
-            ))
-        } else {
-            None
+        if src_filled <= dst_filled {
+            return None;
         }
+
+        let (src_block_ids, _) =
+            src_block_manager.get_block_ids_range(seq.seq_id, dst_filled, src_filled);
+
+        let num_required_blocks = src_block_ids.len();
+        if !dst_block_manager.can_alloc_blocks(num_required_blocks, 1.0) {
+            return None;
+        }
+
+        self.get_block_manager_mut(&dst_dev)
+            .reserve_blocks(&seq.get_token_ids()[..src_filled], dst_filled)
+            .map(|region| {
+                let block_entries: Vec<BlockMappingEntry> = src_block_ids
+                    .iter()
+                    .zip(region.block_ids())
+                    .map(|(&sid, &did)| BlockMappingEntry {
+                        src_block_id: sid,
+                        dst_block_id: did,
+                    })
+                    .collect();
+
+                (
+                    DeviceBlockRegion {
+                        device: dst_dev,
+                        block_region: region,
+                    },
+                    BlockMapping {
+                        entries: block_entries,
+                    },
+                )
+            })
     }
 
     fn copy_blocks(
@@ -420,12 +440,9 @@ impl Scheduler {
     pub fn schedule(&mut self) -> (Vec<InferInput>, Vec<BlockMapping>, Vec<BlockMapping>, Stats) {
         let mut allocated: VecDeque<InferTask> = VecDeque::new();
 
-        while let Some(mut infer_task) = self.allocated.pop_front() {
-            if self.try_extend_infer_task(&mut infer_task, 1.0) {
-                for seq in infer_task.get_active_seqs_mut() {
-                    seq.status = SeqStatus::Allocated;
-                }
-                self.try_extend_host_infer_task(&infer_task);
+        while let Some(infer_task) = self.allocated.pop_front() {
+            if self.try_extend_infer_task(&infer_task, 1.0, Device::Gpu) {
+                self.try_extend_infer_task(&infer_task, 1.0, Device::Host);
 
                 allocated.push_back(infer_task);
             } else if let Some(mut preempt_task) = self.allocated.pop_back() {
@@ -441,11 +458,8 @@ impl Scheduler {
         }
 
         while let Some(mut infer_task) = self.waiting.pop_front() {
-            if self.try_alloc_infer_task(&mut infer_task, self.watermark_blocks) {
-                for seq in infer_task.get_active_seqs_mut() {
-                    seq.status = SeqStatus::Allocated;
-                }
-                self.try_extend_host_infer_task(&infer_task);
+            if self.try_alloc_infer_task(&mut infer_task, self.watermark_blocks, Device::Gpu) {
+                self.try_extend_infer_task(&infer_task, 1.0, Device::Host);
 
                 allocated.push_back(infer_task);
             } else {
@@ -481,7 +495,7 @@ impl Scheduler {
         )
     }
 
-    pub fn commit(&mut self, infer_outputs: HashMap<u64, InferOutput>) -> Vec<InferTask> {
+    pub fn update(&mut self, infer_outputs: HashMap<u64, InferOutput>) -> Vec<InferTask> {
         let mut finished_tasks: Vec<InferTask> = Vec::new();
         let mut still_allocated_tasks = VecDeque::with_capacity(self.allocated.len());
         let now = utils::time::now_ns();

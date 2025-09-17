@@ -52,6 +52,7 @@ impl GenerateOutput {
 }
 
 pub struct ReserveOutput {
+    pub region_id: Option<String>,
     pub kv_descs: Vec<Bytes>,
     pub hash_values: Vec<u64>,
 }

@@ -121,6 +121,7 @@ impl Llm for LLMService {
             .expect("Failed to reserve request");
 
         return Ok(Response::new(ReserveResponse {
+            region_id: output.region_id,
             hash_values: output.hash_values,
             kv_descs: output.kv_descs,
         }));
@@ -155,11 +156,12 @@ impl Llm for LLMService {
         let trigger_request = request.into_inner();
 
         let session_id = trigger_request.session_id;
+        let region_id = trigger_request.region_id;
         let hash_values = trigger_request.hash_values;
 
         let output = self
             .engine
-            .trigger(session_id, hash_values)
+            .trigger(session_id, region_id, hash_values)
             .await
             .expect("Failed to trigger");
 

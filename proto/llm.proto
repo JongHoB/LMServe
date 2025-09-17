@@ -65,8 +65,9 @@ message ReserveRequest {
 }
 
 message ReserveResponse {
-  repeated bytes kv_descs = 1;
-  repeated uint64 hash_values = 2;
+  optional string region_id = 1;
+  repeated bytes kv_descs = 2;
+  repeated uint64 hash_values = 3;
 }
 
 message TransferKVRequest {
@@ -82,7 +83,8 @@ message TransferKVResponse {
 
 message TriggerRequest {
   string session_id = 1;
-  repeated uint64 hash_values = 2;
+  optional string region_id = 2;
+  repeated uint64 hash_values = 3;
 }
 
 message AgentMetadata {

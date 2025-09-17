@@ -15,7 +15,7 @@ use crate::stats::Stats;
 use super::Bytes;
 use super::infer_task::InferTask;
 use super::outputs::{EngineStats, GenerateOutput, ReserveOutput, TransferOutput};
-use super::scheduler::Scheduler;
+use super::scheduler::{Device, Scheduler};
 use super::sequence::Sequence;
 use super::worker::{KVWorkerGroup, ModelWorkerGroup};
 
@@ -97,7 +97,7 @@ impl Observer {
         })
     }
 
-    pub async fn cancel_all(&self) -> usize{
+    pub async fn cancel_all(&self) -> usize {
         let mut q = self.handles.lock().await;
         let n = q.len();
         for h in q.drain(..) {
@@ -299,7 +299,7 @@ impl LLMEngine {
         let infer_task = InferTask::new(session_id.clone(), seqs, arrival_time);
         let (plan, stats) = {
             let mut scheduler_guard = self.scheduler.lock().await;
-            scheduler_guard.init_prefix_cache_blocks(&infer_task);
+            scheduler_guard.init_prefix_cache_blocks(&infer_task, &[Device::Host, Device::Disk]);
 
             let plan = scheduler_guard.plan_stage(&infer_task);
 
@@ -318,15 +318,16 @@ impl LLMEngine {
 
         self.publish_stats(stats).await?;
 
-        if let Some((block_mapping, hash_values)) = plan {
+        if let Some((block_region, block_mapping)) = plan {
             let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
             let scheduler = Arc::clone(&self.scheduler);
             let handle = tokio::spawn(async move {
                 let _ = kv_disk_worker_group.swap_in_kv(vec![block_mapping]).await;
-                scheduler
-                    .lock()
-                    .await
-                    .trigger_pend_task(session_id, &hash_values);
+                scheduler.lock().await.trigger_pend_task(
+                    session_id,
+                    Some(block_region.region_id().to_string()),
+                    block_region.hashes(),
+                );
                 Ok(())
             });
             self.observer.register(handle).await;
@@ -342,7 +343,7 @@ impl LLMEngine {
         session_id: String,
         max_output_len: Option<usize>,
         ignore_eos: bool,
-    ) -> Result<(Vec<Bytes>, Vec<u64>)> {
+    ) -> Result<(Option<String>, Vec<Bytes>, Vec<u64>)> {
         let mut seqs: Vec<Sequence> = Vec::new();
         for _ in 0..num_samples {
             let seq = Sequence::new(
@@ -356,27 +357,42 @@ impl LLMEngine {
 
         let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
 
-        let (block_ids, hash_values) = self.scheduler.lock().await.reserve_buffer(&infer_task);
-
-        let kv_descs: Vec<Bytes> = if block_ids.is_empty() {
-            Vec::new()
-        } else {
-            self.kv_agent_worker_group
-                .get_descriptors(block_ids.to_vec())
-                .await
-                .unwrap_or_else(|e| panic!("Failed to get descriptors: {e}"))
-        };
+        let block_region = self
+            .scheduler
+            .lock()
+            .await
+            .reserve_blocks(&infer_task, Device::Host);
 
         self.scheduler.lock().await.pend(infer_task);
 
-        Ok((kv_descs, hash_values))
+        match block_region {
+            Some(block_region) => {
+                let kv_descs = self
+                    .kv_agent_worker_group
+                    .get_descriptors(block_region.block_ids().into())
+                    .await
+                    .unwrap_or_else(|e| panic!("failed to get descriptors: {e}"));
+
+                Ok((
+                    Some(block_region.region_id().to_string()),
+                    kv_descs,
+                    block_region.hashes().into(),
+                ))
+            }
+            None => Ok((None, vec![], vec![])),
+        }
     }
 
-    async fn trigger_request(&self, session_id: String, hash_values: Vec<u64>) -> Result<()> {
+    async fn trigger_request(
+        &self,
+        session_id: String,
+        region_id: Option<String>,
+        hash_values: Vec<u64>,
+    ) -> Result<()> {
         self.scheduler
             .lock()
             .await
-            .trigger_pend_task(session_id, &hash_values);
+            .trigger_pend_task(session_id, region_id, &hash_values);
 
         Ok(())
     }
@@ -413,7 +429,7 @@ impl LLMEngine {
 
         let (finished_tasks, stats) = {
             let mut scheduler_guard = self.scheduler.lock().await;
-            let finished_tasks = scheduler_guard.commit(infer_outputs);
+            let finished_tasks = scheduler_guard.update(infer_outputs);
             let stats = scheduler_guard.get_stats();
             (finished_tasks, stats)
         };
@@ -421,8 +437,6 @@ impl LLMEngine {
         if !finished_tasks.is_empty() {
             let _ = self.publish_stats(stats).await;
             for task in finished_tasks.iter() {
-                let session_id = task.get_session_id();
-
                 let backup_plan = {
                     let mut scheduler_guard = self.scheduler.lock().await;
                     let plan = scheduler_guard.backup(task);
@@ -430,7 +444,7 @@ impl LLMEngine {
                     plan
                 };
 
-                let (block_mapping, hash_values) = match backup_plan {
+                let (block_region, block_mapping) = match backup_plan {
                     Some((bm, hv)) => (bm, hv),
                     None => continue,
                 };
@@ -440,10 +454,7 @@ impl LLMEngine {
 
                 let handle = tokio::spawn(async move {
                     let _ = kv_disk_worker_group.swap_out_kv(vec![block_mapping]).await;
-                    scheduler
-                        .lock()
-                        .await
-                        .release_disk_buffer(&session_id, &hash_values);
+                    scheduler.lock().await.commit_reserved_blocks(block_region);
                     Ok(())
                 });
 
@@ -472,6 +483,7 @@ impl LLMEngine {
         Ok(new_peer_names)
     }
 
+    #[allow(unused_variables)]
     async fn push_kv(
         &self,
         session_id: String,
@@ -479,26 +491,24 @@ impl LLMEngine {
         kv_descs: Vec<Bytes>,
         hash_values: Vec<u64>,
     ) -> Vec<u64> {
-        let block_ids = self
+        let block_region = self
             .scheduler
             .lock()
             .await
-            .pin_buffer(&session_id, &hash_values);
-        let num_blocks = block_ids.len();
+            .pin_blocks(&hash_values, Device::Host);
 
-        if num_blocks > 0 {
+        let block_ids = block_region.block_ids();
+        if !block_ids.is_empty() {
             self.kv_agent_worker_group
-                .push_kv(peer_names, kv_descs, block_ids)
+                .push_kv(peer_names, kv_descs, block_region.block_ids().to_vec())
                 .await
                 .unwrap_or_else(|e| panic!("Failed to push KVs: {e}"));
         }
 
-        self.scheduler
-            .lock()
-            .await
-            .release_buffer(&session_id, &hash_values);
+        let hashes = block_region.hashes().to_vec();
+        self.scheduler.lock().await.unpin_blocks(block_region);
 
-        hash_values[0..num_blocks].to_vec()
+        hashes
     }
 
     async fn clear_cache(&self) -> Result<()> {
@@ -646,7 +656,7 @@ impl LLMEngineWrapper {
         max_output_len: Option<usize>,
         ignore_eos: bool,
     ) -> Result<ReserveOutput> {
-        let (kv_descs, hash_values) = self
+        let (region_id, kv_descs, hash_values) = self
             .engine
             .reserve_request(
                 input_ids.clone(),
@@ -658,6 +668,7 @@ impl LLMEngineWrapper {
             .await?;
 
         Ok(ReserveOutput {
+            region_id,
             kv_descs,
             hash_values,
         })
@@ -680,6 +691,7 @@ impl LLMEngineWrapper {
     pub async fn trigger(
         &self,
         session_id: String,
+        region_id: Option<String>,
         hash_values: Vec<u64>,
     ) -> Result<GenerateOutput> {
         let notify = Arc::new(Notify::new());
@@ -689,7 +701,7 @@ impl LLMEngineWrapper {
             .insert(session_id.clone(), notify.clone());
 
         self.engine
-            .trigger_request(session_id.clone(), hash_values)
+            .trigger_request(session_id.clone(), region_id, hash_values)
             .await?;
 
         notify.notified().await;

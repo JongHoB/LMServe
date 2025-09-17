@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use linked_hash_set::LinkedHashSet;
 use tracing::warn;
@@ -65,7 +65,6 @@ struct BlockAllocator {
     free_block_ids: LinkedHashSet<u32>,
 }
 
-// Make BlockAllocator methods return `Option<T>` instead of panicking.
 impl BlockAllocator {
     pub fn new(block_size: usize, num_blocks: usize) -> Self {
         let block_pool: Vec<Block> = (0..num_blocks as u32)
@@ -165,6 +164,37 @@ impl BlockAllocator {
     }
 }
 
+pub type BlockHashPair = (u32, u64);
+
+#[derive(Debug, Clone)]
+pub struct BlockRegion {
+    id: String,
+    block_ids: Vec<u32>,
+    hashes: Vec<u64>,
+}
+
+impl BlockRegion {
+    fn new(block_hash_pairs: Vec<BlockHashPair>) -> Self {
+        Self {
+            id: utils::random::generate_id(),
+            block_ids: block_hash_pairs.iter().map(|b| b.0).collect(),
+            hashes: block_hash_pairs.iter().map(|b| b.1).collect(),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn block_ids(&self) -> &[u32] {
+        &self.block_ids
+    }
+
+    pub fn hashes(&self) -> &[u64] {
+        &self.hashes
+    }
+}
+
 struct BlockMap {
     block_ids: Vec<u32>,
     num_allocated_slots: usize,
@@ -191,7 +221,7 @@ pub struct BlockManager {
     seq_block_mapping_table: HashMap<u64, BlockMap>,
     hash_block_table: HashMap<u64, u32>, // HashMap<hash value, block id>
     block_allocator: BlockAllocator,
-    block_buffer: HashMap<String, Vec<u32>>, // HashMap<session_id, block_ids>
+    reserved_blocks_table: HashMap<String, Vec<u32>>,
 }
 
 impl BlockManager {
@@ -203,7 +233,7 @@ impl BlockManager {
             seq_block_mapping_table: HashMap::new(),
             hash_block_table: HashMap::new(),
             block_allocator,
-            block_buffer: HashMap::new(),
+            reserved_blocks_table: HashMap::new(),
         }
     }
 
@@ -476,18 +506,11 @@ impl BlockManager {
         num_add_slots
     }
 
-    pub fn reserve_buffer_by_tokens(
-        &mut self,
-        session_id: &str,
-        token_ids: &[u32],
-        start: usize,
-    ) -> (Vec<u32>, Vec<u64>) {
+    pub fn reserve_blocks(&mut self, token_ids: &[u32], start: usize) -> Option<BlockRegion> {
         let start = (start / self.block_size) * self.block_size;
         let end = token_ids.len();
 
-        let mut block_ids: Vec<u32> = Vec::new();
-        let mut hash_values: Vec<u64> = Vec::new();
-
+        let mut block_hash_pairs: Vec<BlockHashPair> = Vec::new();
         for token_offset in (start..end).step_by(self.block_size) {
             let token_end = min(token_offset + self.block_size, end);
             let sub_token_ids = &token_ids[token_offset..token_end];
@@ -505,56 +528,83 @@ impl BlockManager {
             let hash = compute_hash(&token_ids[..token_end]);
             block.set_hash(hash);
 
-            block_ids.push(block.id);
-            hash_values.push(block.get_hash());
+            block_hash_pairs.push((block.id, block.get_hash()));
         }
 
-        if !block_ids.is_empty() {
-            self.block_buffer
-                .insert(session_id.to_string(), block_ids.clone());
+        if block_hash_pairs.is_empty() {
+            return None;
         }
 
-        (block_ids, hash_values)
+        let block_region = BlockRegion::new(block_hash_pairs);
+        self.reserved_blocks_table.insert(
+            block_region.id().to_string(),
+            block_region.block_ids().to_vec(),
+        );
+
+        Some(block_region)
     }
 
-    pub fn pin_buffer_by_hashes(&mut self, session_id: &str, hash_values: &[u64]) -> Vec<u32> {
-        let mut block_ids: Vec<u32> = Vec::new();
-        for hash in hash_values {
-            if let Some(block_id) = self.lookup_block_id(*hash) {
+    pub fn activate_reserved_blocks(&mut self, region_id: &str, hash_values: &[u64]) -> usize {
+        let Some(block_ids) = self.reserved_blocks_table.remove(region_id) else {
+            return 0;
+        };
+
+        let block_hash_set: HashSet<u64> = hash_values.iter().copied().collect();
+
+        let mut activated = 0usize;
+
+        for block_id in block_ids {
+            let block = self.block_allocator.get_block(block_id);
+            let h = block.get_hash();
+
+            if block_hash_set.contains(&h) {
+                self.hash_block_table.entry(h).or_insert(block_id);
+                activated += 1;
+            }
+
+            self.block_allocator.free_block(block_id);
+        }
+
+        activated
+    }
+
+    pub fn pin_blocks_by_hashes(&mut self, hash_values: &[u64]) -> BlockRegion {
+        let mut block_hash_pairs: Vec<BlockHashPair> = Vec::new();
+        for &hash in hash_values {
+            if let Some(block_id) = self.lookup_block_id(hash) {
                 self.block_allocator.alloc_block_by_id(block_id);
-                block_ids.push(block_id);
+                block_hash_pairs.push((block_id, hash));
             } else {
                 warn!(
-                    "Session [{}]: Block not found for hash {}. Aborting pinning buffer ({}/{})",
-                    session_id,
+                    "Block not found for hash {}. Aborting pinning buffer ({}/{})",
                     hash,
-                    block_ids.len(),
+                    block_hash_pairs.len(),
                     hash_values.len(),
                 );
                 break;
             }
         }
 
-        if !block_ids.is_empty() {
-            self.block_buffer
-                .insert(session_id.to_string(), block_ids.clone());
-        }
+        let block_region = BlockRegion::new(block_hash_pairs);
+        self.reserved_blocks_table.insert(
+            block_region.id().to_string(),
+            block_region.block_ids().to_vec(),
+        );
 
-        block_ids
+        block_region
     }
 
-    pub fn release_buffer(&mut self, session_id: &str, hash_values: &[u64]) {
-        if let Some(block_ids) = self.block_buffer.remove(session_id) {
-            for (hash, block_id) in hash_values.iter().zip(block_ids) {
-                let block = self.block_allocator.get_block(block_id);
-                let block_hash = block.get_hash();
-                if block_hash == *hash {
-                    self.hash_block_table.entry(block_hash).or_insert(block_id);
-                }
+    pub fn unpin_blocks(&mut self, region_id: &str) -> usize {
+        let Some(block_ids) = self.reserved_blocks_table.remove(region_id) else {
+            return 0;
+        };
 
-                self.block_allocator.free_block(block_id);
-            }
+        let num_blocks = block_ids.len();
+        for block_id in block_ids {
+            self.block_allocator.free_block(block_id);
         }
+
+        num_blocks
     }
 
     pub fn get_num_prefix_cache_blocks(&self, token_ids: &[u32]) -> usize {
@@ -589,6 +639,5 @@ impl BlockManager {
 
     pub fn clear_cache(&mut self) {
         self.hash_block_table.clear();
-        self.block_buffer.clear();
     }
 }
