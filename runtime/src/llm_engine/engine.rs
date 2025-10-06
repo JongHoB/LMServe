@@ -1,15 +1,12 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use tokio::join;
 use tokio::sync::{Mutex, Notify};
-use tokio::task::JoinHandle;
-use tokio::time;
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::background_manager::BackgroundTaskManager;
 use crate::stats::Stats;
 
 use super::Bytes;
@@ -18,99 +15,6 @@ use super::outputs::{EngineStats, GenerateOutput, ReserveOutput, TransferOutput}
 use super::scheduler::{Device, Scheduler};
 use super::sequence::Sequence;
 use super::worker::{KVWorkerGroup, ModelWorkerGroup};
-
-type AsyncResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-type AsyncTask = JoinHandle<AsyncResult>;
-type AsyncQueue = Arc<Mutex<VecDeque<AsyncTask>>>;
-
-struct Observer {
-    handles: AsyncQueue,
-    cancel: CancellationToken,
-}
-
-impl Default for Observer {
-    fn default() -> Self {
-        Self {
-            handles: AsyncQueue::default(),
-            cancel: CancellationToken::new(),
-        }
-    }
-}
-
-impl Observer {
-    fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    async fn register(&self, handle: AsyncTask) {
-        self.handles.lock().await.push_back(handle);
-    }
-
-    async fn check_once(&self) -> usize {
-        let mut finished: Vec<AsyncTask> = Vec::new();
-        {
-            let mut q = self.handles.lock().await;
-
-            let mut i = 0;
-            while i < q.len() {
-                if q[i].is_finished() {
-                    finished.push(q.remove(i).unwrap());
-                } else {
-                    i += 1;
-                }
-            }
-        }
-
-        let mut drained = 0;
-        for h in finished {
-            match h.await {
-                Ok(Ok(())) => drained += 1,
-                Ok(Err(e)) => {
-                    eprintln!("[job error] {e}");
-                    drained += 1;
-                }
-                Err(join_err) => {
-                    eprintln!("[join error] {join_err}");
-                    drained += 1;
-                }
-            }
-        }
-
-        drained
-    }
-
-    fn spawn_loop(self: &Arc<Self>, period: Duration) -> JoinHandle<()> {
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut tick = time::interval(period);
-            loop {
-                tokio::select! {
-                    _ = this.cancel.cancelled() => break,
-                    _ = tick.tick() => {
-                        let n = this.check_once().await;
-                        if n>0 {
-                            //
-                        }
-                    }
-                }
-            }
-        })
-    }
-
-    pub async fn cancel_all(&self) -> usize {
-        let mut q = self.handles.lock().await;
-        let n = q.len();
-        for h in q.drain(..) {
-            h.abort();
-            let _ = h.await;
-        }
-        n
-    }
-
-    pub fn shutdown(&self) {
-        self.cancel.cancel();
-    }
-}
 
 #[allow(dead_code)]
 pub struct LLMEngine {
@@ -135,7 +39,7 @@ pub struct LLMEngine {
 
     scheduler: Arc<Mutex<Scheduler>>,
 
-    observer: Arc<Observer>,
+    bg_mgr: Arc<BackgroundTaskManager>,
 }
 
 impl LLMEngine {
@@ -237,9 +141,6 @@ impl LLMEngine {
                 .await?
         }
 
-        let observer = Observer::new();
-        observer.spawn_loop(Duration::from_millis(200));
-
         Ok(LLMEngine {
             id,
             model_name,
@@ -256,7 +157,7 @@ impl LLMEngine {
             nats_client,
             local_kv_agent_metadata,
             scheduler: Arc::new(Mutex::new(scheduler)),
-            observer,
+            bg_mgr: BackgroundTaskManager::new(),
         })
     }
 
@@ -297,41 +198,46 @@ impl LLMEngine {
         }
 
         let infer_task = InferTask::new(session_id.clone(), seqs, arrival_time);
-        let (plan, stats) = {
+        let stats = {
             let mut scheduler_guard = self.scheduler.lock().await;
             scheduler_guard.init_prefix_cache_blocks(&infer_task, &[Device::Host, Device::Disk]);
 
             let plan = scheduler_guard.plan_stage(&infer_task);
 
             match plan {
-                Some(_) => {
+                Some((block_region, block_mapping)) => {
                     scheduler_guard.pend(infer_task);
+
+                    let swap_in_task = {
+                        let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
+                        async move { kv_disk_worker_group.swap_in_kv(vec![block_mapping]).await }
+                    };
+
+                    let callback = {
+                        let scheduler = Arc::clone(&self.scheduler);
+                        let block_region = block_region.clone();
+                        async move {
+                            scheduler.lock().await.trigger_pend_task(
+                                session_id,
+                                Some(block_region.region_id().to_string()),
+                                block_region.hashes(),
+                            );
+
+                            Ok(())
+                        }
+                    };
+
+                    self.bg_mgr.clone().submit(swap_in_task, callback);
                 }
                 None => {
                     scheduler_guard.add(infer_task);
                 }
             }
 
-            let stats = scheduler_guard.get_stats();
-            (plan, stats)
+            scheduler_guard.get_stats()
         };
 
         self.publish_stats(stats).await?;
-
-        if let Some((block_region, block_mapping)) = plan {
-            let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
-            let scheduler = Arc::clone(&self.scheduler);
-            let handle = tokio::spawn(async move {
-                let _ = kv_disk_worker_group.swap_in_kv(vec![block_mapping]).await;
-                scheduler.lock().await.trigger_pend_task(
-                    session_id,
-                    Some(block_region.region_id().to_string()),
-                    block_region.hashes(),
-                );
-                Ok(())
-            });
-            self.observer.register(handle).await;
-        }
 
         Ok(())
     }
@@ -437,28 +343,26 @@ impl LLMEngine {
         if !finished_tasks.is_empty() {
             let _ = self.publish_stats(stats).await;
             for task in finished_tasks.iter() {
-                let backup_plan = {
-                    let mut scheduler_guard = self.scheduler.lock().await;
-                    let plan = scheduler_guard.backup(task);
-                    scheduler_guard.remove_task(task);
-                    plan
-                };
+                let mut scheduler_guard = self.scheduler.lock().await;
+                let plan = scheduler_guard.backup(task);
+                if let Some((br, bm)) = plan {
+                    let swap_out_task = {
+                        let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
+                        async move { kv_disk_worker_group.swap_out_kv(vec![bm]).await }
+                    };
 
-                let (block_region, block_mapping) = match backup_plan {
-                    Some((bm, hv)) => (bm, hv),
-                    None => continue,
-                };
+                    let callback = {
+                        let scheduler = Arc::clone(&self.scheduler);
+                        let block_region = br.clone();
+                        async move {
+                            scheduler.lock().await.commit_reserved_blocks(block_region);
+                            Ok(())
+                        }
+                    };
 
-                let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
-                let scheduler = Arc::clone(&self.scheduler);
-
-                let handle = tokio::spawn(async move {
-                    let _ = kv_disk_worker_group.swap_out_kv(vec![block_mapping]).await;
-                    scheduler.lock().await.commit_reserved_blocks(block_region);
-                    Ok(())
-                });
-
-                self.observer.register(handle).await;
+                    self.bg_mgr.clone().submit(swap_out_task, callback);
+                }
+                scheduler_guard.remove_task(task);
             }
             Some(finished_tasks)
         } else {
@@ -517,7 +421,7 @@ impl LLMEngine {
                 let mut scheduler_guard = self.scheduler.lock().await;
 
                 if scheduler_guard.is_task_queue_empty() {
-                    let _ = self.observer.cancel_all();
+                    self.bg_mgr.clone().wait().await;
                     scheduler_guard.clear_cache();
                     break;
                 }
@@ -526,13 +430,6 @@ impl LLMEngine {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
         Ok(())
-    }
-}
-
-impl Drop for LLMEngine {
-    fn drop(&mut self) {
-        let _ = self.observer.cancel_all();
-        self.observer.shutdown();
     }
 }
 
