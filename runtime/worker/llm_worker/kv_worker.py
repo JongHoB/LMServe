@@ -62,7 +62,6 @@ def memmap_disk_kv_cache(
                     format(kv_cache.shape, kv_cache.dtype, shape,
                            np.dtype(dtype)))
                 kv_cache._mmap.close()
-                del arr
                 os.remove(kv_cache_file)
                 need_new = True
             else:
