@@ -1,13 +1,15 @@
-use std::{collections::HashMap, sync::Arc, thread::JoinHandle};
+use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::JoinHandle;
 
 use anyhow::Result;
 use async_nats;
 use futures::StreamExt;
 use serde_json;
-use tokio::{
-    runtime::Builder,
-    sync::{RwLock, oneshot},
-};
+use tokio::{runtime::Builder, sync::RwLock};
 use tracing::{info, warn};
 
 use crate::stats::Stats;
@@ -15,36 +17,41 @@ use crate::stats::Stats;
 type ShareMap = Arc<RwLock<HashMap<String, Stats>>>;
 
 pub struct StatsMonitor {
-    shut_tx: Option<oneshot::Sender<()>>,
     handle: Option<JoinHandle<()>>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    is_shutdown: Arc<AtomicBool>,
 }
 
 impl StatsMonitor {
     pub fn start(nats_uri: &str) -> Result<Self> {
         let uri = nats_uri.to_string();
 
-        let (shut_tx, shut_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let is_shutdown = Arc::new(AtomicBool::new(false));
 
         let handle = std::thread::spawn(move || {
             let rt = Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to build monitor thread");
-            if let Err(e) = rt.block_on(run_async(&uri, shut_rx)) {
-                warn!("monitor exit with error: {e:?}");
+            if let Err(e) = rt.block_on(run_async(&uri, shutdown_rx)) {
+                warn!("Monitor terminated with error: {e:?}");
             };
         });
 
         Ok(Self {
-            shut_tx: Some(shut_tx),
             handle: Some(handle),
+            shutdown_tx,
+            is_shutdown,
         })
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
-        if let Some(tx) = self.shut_tx.take() {
-            let _ = tx.send(());
+        if self.is_shutdown.swap(true, Ordering::SeqCst) {
+            return Ok(());
         }
+
+        let _ = self.shutdown_tx.send(true);
 
         if let Some(handle) = self.handle.take() {
             handle.join().map_err(|e| anyhow::anyhow!("{:?}", e))?;
@@ -60,7 +67,10 @@ impl Drop for StatsMonitor {
     }
 }
 
-async fn run_async(uri: &str, mut shut_rx: oneshot::Receiver<()>) -> Result<(), async_nats::Error> {
+async fn run_async(
+    uri: &str,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), async_nats::Error> {
     let nc = async_nats::connect(uri).await?;
     let updates = nc.subscribe("stats.update.*").await?;
     let queries = nc.subscribe("stats.query.*").await?;
@@ -124,9 +134,10 @@ async fn run_async(uri: &str, mut shut_rx: oneshot::Receiver<()>) -> Result<(), 
     info!("Stats monitor daemon started.");
 
     tokio::select! {
-    _ = &mut shut_rx => {info!("shutdown signal received");}
+    _ = shutdown_rx.changed() => {info!("shutdown signal received");}
     res = (&mut updates_handle) => {warn!("Update task ended: {res:?}");}
     res = (&mut queries_handle) => {warn!("Query task ended: {res:?}");}
+
     }
 
     updates_handle.abort();
