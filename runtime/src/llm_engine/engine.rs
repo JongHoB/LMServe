@@ -87,6 +87,13 @@ impl LLMEngine {
             )
             .await
             .unwrap_or_else(|e| panic!("Failed to init KV cache: {e}"));
+
+        // After init cache, run warmup
+        let _ = model_worker_group
+            .warmup(max_batch_size, max_seq_len, max_num_batched_tokens)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to warmup worker: {e}"));
+
         info!("Created {num_gpu_blocks} KV cache blocks on GPU memory.");
         if num_host_blocks > 0 {
             info!("Created {num_host_blocks} KV cache blocks on Host memory.");

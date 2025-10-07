@@ -469,22 +469,25 @@ class ModelWorker:
         for i, token_id in enumerate(total_token_ids):
             token_ids_list[i % max_batch_size].append(token_id)
 
+        block_size = self.block_size
         for i, token_ids in enumerate(token_ids_list):
+            input_len = len(token_ids)
+            num_kv_blocks = (input_len + block_size - 1) // block_size
             inputs.append(
                 InferInput(
                     seq_id=i,
                     input_ids=token_ids,
-                    input_len=len(token_ids),
+                    input_len=input_len,
                     filled_token_len=0,
                     context_len=len(token_ids),
-                    block_ids=[],
+                    block_ids=list(range(0, num_kv_blocks)),
                 ))
 
         input_ids, input_params = self._make_inputs(inputs)
         logits = self.model(
             input_ids=input_ids,
             input_params=input_params,
-            kv_caches=None,
+            kv_caches=None if self.kv_caches is None else self.kv_caches,
         )
 
         # The code below does sampling.
