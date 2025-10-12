@@ -21,7 +21,7 @@ default_fn!(default_disk_kv_cache_size, usize, 0);
 default_fn!(default_disk_kv_cache_path, String, String::from("/tmp"));
 default_fn!(default_max_batch_size, usize, 256);
 default_fn!(default_max_seq_len, usize, 16384);
-default_fn!(default_max_num_batched_tokens, usize, 512);
+default_fn!(default_max_num_batched_tokens, usize, 2048);
 default_fn!(default_tp_size, u8, 1);
 default_fn!(
     default_nats_uri,
