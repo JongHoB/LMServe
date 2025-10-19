@@ -9,3 +9,5 @@ controller:
 llm_servers:
   - kind: "all"
     address: "127.0.0.1:7000"
+    host_kv_cache_size: 40  # GiB
+    disk_kv_cache_size: 120 # GiB
