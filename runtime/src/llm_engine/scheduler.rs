@@ -119,8 +119,12 @@ impl Scheduler {
 
         let head_seq = infer_task.get_head_seq().expect("No active sequence found");
 
-        let host_filled = self.host_block_manager.get_filled_token_len(head_seq.seq_id);
-        let disk_filled = self.disk_block_manager.get_filled_token_len(head_seq.seq_id);
+        let host_filled = self
+            .host_block_manager
+            .get_filled_token_len(head_seq.seq_id);
+        let disk_filled = self
+            .disk_block_manager
+            .get_filled_token_len(head_seq.seq_id);
         // NOTE(jinu):
         // If no pending requests and the number of reusable KVs on disk is below threshold,
         // recompute instead of waiting for KV restoration.
@@ -290,7 +294,7 @@ impl Scheduler {
         }
 
         let (src_block_ids, _) =
-            src_block_manager.get_block_ids_range(seq.seq_id, dst_filled, src_filled);
+            src_block_manager.get_block_ids_range(seq.seq_id, dst_filled, src_filled, false)?;
 
         let num_required_blocks = src_block_ids.len();
         if !dst_block_manager.can_alloc_blocks(num_required_blocks, 1.0) {
@@ -326,6 +330,7 @@ impl Scheduler {
         seq: &Sequence,
         src_dev: Device,
         dst_dev: Device,
+        include_partial_block: bool,
     ) -> Option<(BlockMapping, usize)> {
         let src_block_manager = self.get_block_manager(&src_dev);
         let dst_block_manager = self.get_block_manager(&dst_dev);
@@ -337,12 +342,16 @@ impl Scheduler {
         let end = src_filled.min(num_dst_allocated_slots);
 
         // If the cached tokens in src device has more than dst device,
-        // it makes a block mapping to fetch the remaiing tokens.
+        // it makes a block mapping to fetch the remaining tokens.
         if end > dst_filled {
-            let (src_block_ids, _) =
-                src_block_manager.get_block_ids_range(seq.seq_id, dst_filled, end);
-            let (dst_block_ids, _) =
-                dst_block_manager.get_block_ids_range(seq.seq_id, dst_filled, end);
+            let (src_block_ids, src_last_filled_token_idx) = src_block_manager
+                .get_block_ids_range(seq.seq_id, dst_filled, end, include_partial_block)?;
+            let (dst_block_ids, _) = dst_block_manager.get_block_ids_range(
+                seq.seq_id,
+                dst_filled,
+                end,
+                include_partial_block,
+            )?;
 
             let mut block_entries: Vec<_> =
                 Vec::with_capacity(src_block_ids.len().min(dst_block_ids.len()));
@@ -357,7 +366,7 @@ impl Scheduler {
                 BlockMapping {
                     entries: block_entries,
                 },
-                end,
+                src_last_filled_token_idx,
             ))
         } else {
             None
@@ -387,7 +396,7 @@ impl Scheduler {
                 let total = seq.token_ids.len();
 
                 if let Some((block_mapping, filled_end)) =
-                    self.copy_blocks(seq, Device::Host, Device::Gpu)
+                    self.copy_blocks(seq, Device::Host, Device::Gpu, true)
                 {
                     fetch_block_mappings.push(block_mapping);
                     self.gpu_block_manager
@@ -404,11 +413,17 @@ impl Scheduler {
 
                 if input_len > 0 {
                     let input_ids = seq.token_ids[filled..filled + input_len].to_vec();
-                    let (block_ids, _) = self.gpu_block_manager.get_block_ids_range(
+                    let block_range = self.gpu_block_manager.get_block_ids_range(
                         seq.seq_id,
                         0,
                         filled + input_len,
+                        true,
                     );
+
+                    let block_ids = match block_range {
+                        Some((block_ids, _)) => block_ids,
+                        None => continue,
+                    };
 
                     let input_len = input_ids.len();
                     let context_len = input_len + filled;
@@ -423,7 +438,7 @@ impl Scheduler {
                         .update_filled_len(seq.seq_id, context_len);
 
                     if let Some((block_mapping, filled_end)) =
-                        self.copy_blocks(seq, Device::Gpu, Device::Host)
+                        self.copy_blocks(seq, Device::Gpu, Device::Host, false)
                     {
                         write_through_block_mappings.push(block_mapping);
                         self.host_block_manager

@@ -237,25 +237,39 @@ impl BlockManager {
         }
     }
 
-    pub fn get_block_ids_range(&self, seq_id: u64, start: usize, end: usize) -> (Vec<u32>, usize) {
-        let block_offset = start / self.block_size;
-        let mut block_end = end / self.block_size + 1;
+    /// Return (block_range, last_filled_token_idx)
+    pub fn get_block_ids_range(
+        &self,
+        seq_id: u64,
+        start: usize,
+        end: usize,
+        include_partial_block: bool,
+    ) -> Option<(Vec<u32>, usize)> {
+        // Compute block range [block_start, block_end)
+        let block_start = start / self.block_size;
+        let mut block_end = end / self.block_size + usize::from(include_partial_block);
 
-        if let Some(block_map) = self.seq_block_mapping_table.get(&seq_id) {
-            let block_ids = &block_map.block_ids;
-            if block_offset >= block_end || block_offset >= block_ids.len() {
-                return (Vec::new(), block_map.filled_token_len);
-            }
-
-            block_end = block_end.min(block_ids.len());
-
-            (
-                block_ids[block_offset..block_end].to_vec(),
-                block_map.filled_token_len,
-            )
-        } else {
-            (Vec::new(), 0)
+        if block_start >= block_end {
+            return None;
         }
+
+        let block_map = self.seq_block_mapping_table.get(&seq_id)?;
+
+        let block_ids = &block_map.block_ids;
+        if block_start >= block_ids.len() {
+            return None;
+        }
+
+        block_end = block_end.min(block_ids.len());
+
+        let last_block_id = block_ids.get(block_end - 1).unwrap();
+        let last_block = self.block_allocator.get_block(*last_block_id);
+        let last_token_idx = (block_end - 1) * self.block_size + last_block.token_ids.len();
+
+        Some((
+            block_ids[block_start..block_end].to_vec(),
+            last_token_idx.min(block_map.filled_token_len),
+        ))
     }
 
     pub fn get_filled_token_len(&self, seq_id: u64) -> usize {
