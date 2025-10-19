@@ -10,6 +10,8 @@ use super::infer_task::{InferInput, InferOutput, InferTask};
 use super::sequence::SeqStatus;
 use super::sequence::Sequence;
 
+const DISK_RECOMPUTE_THRESHOLD: usize = 2048;
+
 struct BatchEntry {
     pub chunked: bool,
 }
@@ -116,7 +118,16 @@ impl Scheduler {
         self.init_prefix_cache_blocks(infer_task, &[Device::Host, Device::Disk]);
 
         let head_seq = infer_task.get_head_seq().expect("No active sequence found");
-        // TODO(jinu): Add logic to determine if staging is required for this request.
+
+        let host_filled = self.host_block_manager.get_filled_token_len(head_seq.seq_id);
+        let disk_filled = self.disk_block_manager.get_filled_token_len(head_seq.seq_id);
+        // NOTE(jinu):
+        // If no pending requests and the number of reusable KVs on disk is below threshold,
+        // recompute instead of waiting for KV restoration.
+        if self.waiting.is_empty() && (disk_filled - host_filled) < DISK_RECOMPUTE_THRESHOLD {
+            return None;
+        }
+
         self.reserve_copy_blocks(head_seq, Device::Disk, Device::Host)
     }
 
