@@ -1,12 +1,16 @@
 import json
 import os
-import argparse
 import subprocess
 import pandas as pd
 import numpy as np
 
+from loguru import logger
 from datasets import Dataset
 from transformers import AutoTokenizer
+
+from .generator_utils import get_tokenizer_type
+from .dataset_config import get_dataset_config, DatasetConfig
+
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -18,19 +22,24 @@ def check_and_make_data_path(path: str):
         os.mkdir(path)
 
 
-def prepare_sharegpt():
-    data_path = os.path.join(base_dir, "data")
-    check_and_make_data_path(data_path)
+def download_dataset(url: str, output_path: str):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+    logger.info("Download dataset...")
+    subprocess.run(
+        ["wget", "-c", "-q", "--show-progress", "-O", output_path, url],
+        check=True,
+    )
+
+
+def prepare_sharegpt():
+    url = "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
+
+    data_path = os.path.join(base_dir, "data")
     dataset_path = os.path.join(data_path,
                                 "ShareGPT_V3_unfiltered_cleaned_split.json")
 
-    if not os.path.isfile(dataset_path):
-        print("Download dataset...")
-        subprocess.run([
-            "wget", "-O", dataset_path,
-            "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
-        ])
+    download_dataset(url, dataset_path)
 
     with open(dataset_path, 'r', encoding='utf-8') as f:
         raw_data = json.load(f)
@@ -58,23 +67,17 @@ def prepare_sharegpt():
     dataset.save_to_disk(output_path)
 
 
-def prepare_azure(tokenizer_name: AutoTokenizer, type: str):
+def prepare_azure(tokenizer_name: str, type: str):
+    url = f"https://raw.githubusercontent.com/Azure/AzurePublicDataset/refs/heads/master/data/AzureLLMInferenceTrace_{type}.csv"
+
     data_path = os.path.join(base_dir, "data")
-    check_and_make_data_path(data_path)
+    dataset_path = os.path.join(data_path,
+                                f"AzureLLMInferenceTrace_{type}.csv")
 
-    trace_file = f"AzureLLMInferenceTrace_{type}.csv"
-
-    dataset_path = os.path.join(data_path, trace_file)
-    if not os.path.isfile(dataset_path):
-        url = f"https://raw.githubusercontent.com/Azure/AzurePublicDataset/refs/heads/master/data/AzureLLMInferenceTrace_{type}.csv"
-
-        print("Download dataset...")
-        subprocess.run([
-            "wget", "-O", dataset_path,
-            url,
-        ])
+    download_dataset(url, dataset_path)
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    tokenizer_type = get_tokenizer_type(tokenizer_name)
     vocab_size = tokenizer.vocab_size
 
     timestamps = []
@@ -110,7 +113,8 @@ def prepare_azure(tokenizer_name: AutoTokenizer, type: str):
 
     dataset = Dataset.from_list(data)
 
-    output_path = os.path.join(base_dir, f"datasets/azure_{type}")
+    output_path = os.path.join(base_dir,
+                               f"datasets/azure_{type}_{tokenizer_type}")
     dataset.save_to_disk(output_path)
 
 
@@ -118,27 +122,9 @@ def prepare_dataset(dataset: str, tokenizer: str):
     if dataset == "sharegpt":
         prepare_sharegpt()
     elif dataset == "azure_conv":
-        if not tokenizer:
-            raise ValueError(
-                "'--tokenizer' argument is required because the dataset is generated based on the provided tokenizer"
-            )
         prepare_azure(tokenizer, "conv")
     elif dataset == "azure_code":
-        if not tokenizer:
-            raise ValueError(
-                "'--tokenizer' argument is required because the dataset is generated based on the provided tokenizer"
-            )
         prepare_azure(tokenizer, "code")
 
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset",
-                        type=str,
-                        choices=dataset_names,
-                        default="sharegpt")
-    parser.add_argument("--tokenizer", type=str)
-    args = parser.parse_args()
-
-    prepare_dataset(dataset=args.dataset, tokenizer=args.tokenizer)
-    prepare_sharegpt()
+    config: DatasetConfig = get_dataset_config(dataset, tokenizer)
+    return config.load_dataset(tokenizer)

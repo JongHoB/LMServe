@@ -386,4 +386,4 @@ def save_results(
     save_request_stats(results, base_dir=base_dir)
     save_request_trace(results, base_dir=base_dir)
 
-    print(f"Save results into {base_dir}")
+    print(f"Save results into '{base_dir}'")

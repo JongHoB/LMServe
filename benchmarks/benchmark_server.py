@@ -171,7 +171,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-requests", type=int, default=1000)
     parser.add_argument("--tokenizer", type=str, default="Qwen/Qwen2.5-0.5B")
     parser.add_argument("--num-samples", type=int, default=1)
-    parser.add_argument("--rate", type=float, default=1.0)
+    parser.add_argument("--rate", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--disable-ignore-eos", action="store_true")
     parser.add_argument("--print-output-text", action="store_true")

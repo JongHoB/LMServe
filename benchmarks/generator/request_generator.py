@@ -1,4 +1,6 @@
 import numpy as np
+
+from loguru import logger
 from datasets import Dataset
 
 from typing import List, Optional, Tuple
@@ -6,6 +8,7 @@ from transformers import AutoTokenizer
 
 from .request import APIRequest
 from .dataset_config import get_dataset_config, DatasetConfig
+from .prepare_dataset import prepare_dataset
 
 
 def load_and_preprocess_dataset(
@@ -14,9 +17,16 @@ def load_and_preprocess_dataset(
     max_length: Optional[int] = None,
     include_time: bool = False,
 ) -> Dataset:
-    config: DatasetConfig = get_dataset_config(dataset_name)
-    dataset = config.load_fn(**config.args)
+    config: DatasetConfig = get_dataset_config(dataset_name, tokenizer_name)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+    try:
+        dataset = config.load_dataset(tokenizer_name)
+    except FileNotFoundError as e:
+        logger.warning(f"Dataset not found: {e}")
+        logger.info("Preparing dataset...")
+
+        dataset = prepare_dataset(dataset_name, tokenizer_name)
 
     if include_time:
         if "timestamp" not in dataset.column_names:
