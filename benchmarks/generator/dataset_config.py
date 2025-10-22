@@ -16,6 +16,7 @@ class DatasetConfig:
     subset: Optional[str] = None
     split: Optional[str] = None
     with_tokenizer: bool = False
+    multi_turn: bool = False
 
     def load_dataset(self, tokenizer_name: str, **kwargs):
         if self.dataset_path:
@@ -58,6 +59,14 @@ dataset_configs = {
         "human",
         "gpt",
         dataset_path=os.path.join(base_dir, "datasets/sharegpt"),
+    ),
+    "sharegpt_chat":
+    DatasetConfig(
+        "human",
+        "gpt",
+        dataset_path=os.path.join(base_dir, "datasets/sharegpt_chat"),
+        with_tokenizer=True,
+        multi_turn=True,
     ),
     "azure_conv":
     DatasetConfig(

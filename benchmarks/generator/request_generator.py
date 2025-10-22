@@ -1,3 +1,4 @@
+import os
 import numpy as np
 
 from loguru import logger
@@ -6,7 +7,7 @@ from datasets import Dataset
 from typing import List, Optional, Tuple
 from transformers import AutoTokenizer
 
-from .request import APIRequest
+from .request import APIRequest, APIRequestSequence
 from .dataset_config import get_dataset_config, DatasetConfig
 from .prepare_dataset import prepare_dataset
 
@@ -56,7 +57,12 @@ def load_and_preprocess_dataset(
 
         return ret
 
-    tokenized_dataset = dataset.map(tokenize_function, batched=True)
+    dataset = dataset.shuffle()
+
+    allow_batch = (not config.multi_turn)
+    tokenized_dataset = dataset.map(tokenize_function,
+                                    batched=allow_batch,
+                                    num_proc=os.cpu_count())
     return tokenized_dataset
 
 
@@ -76,27 +82,21 @@ def generate_requests(
     )
 
     requests: List[APIRequest] = []
-    num_requests_counter = 0
-    while num_requests_counter < num_requests:
-        dataset = dataset.shuffle()
-        for data in dataset.to_iterable_dataset():
-            input_len = len(data['input_ids'])
-            output_len = len(data['output_ids'])
-            if (output_len <= 4) or ((input_len + output_len) > max_seq_len):
-                continue
+    for data in dataset.to_iterable_dataset():
+        input_len = len(data['input_ids'])
+        output_len = len(data['output_ids'])
+        if (output_len <= 4) or ((input_len + output_len) > max_seq_len):
+            continue
 
-            request = APIRequest(
-                prompt=data['prompt'],
-                num_samples=num_samples,
-                max_output_len=output_len,
-                ignore_eos=ignore_eos,
-            )
-            requests.append(request)
-
-            num_requests_counter += 1
-
-            if num_requests_counter >= num_requests:
-                break
+        request = APIRequest(
+            prompt=data['prompt'],
+            num_samples=num_samples,
+            max_output_len=output_len,
+            ignore_eos=ignore_eos,
+        )
+        requests.append(request)
+        if len(requests) >= num_requests:
+            break
 
     return requests
 
@@ -115,23 +115,18 @@ def generate_trace(
 
     requests: List[APIRequest] = []
     timestamps: List[float] = []
-    num_requests_counter = 0
-    while num_requests_counter < num_requests:
-        for data in dataset.to_iterable_dataset():
-            request = APIRequest(
-                prompt=data['prompt'],
-                num_samples=1,
-                max_output_len=len(data['output_ids']),
-                ignore_eos=True,
-            )
+    for data in dataset.to_iterable_dataset():
+        request = APIRequest(
+            prompt=data['prompt'],
+            num_samples=1,
+            max_output_len=len(data['output_ids']),
+            ignore_eos=True,
+        )
 
-            requests.append(request)
-            timestamps.append(data['timestamp'])
-
-            num_requests_counter += 1
-
-            if num_requests_counter >= num_requests:
-                break
+        requests.append(request)
+        timestamps.append(data['timestamp'])
+        if len(requests) >= num_requests:
+            break
 
     intervals = [0] + [(timestamps[i] - timestamps[i - 1])
                        for i in range(1, len(timestamps))]
@@ -170,3 +165,41 @@ def generate_radom_requests(
         requests.append(request)
 
     return requests
+
+
+def generate_chat_requests(
+    dataset_name: str,
+    tokenizer_name: str,
+    num_sessions: int,
+    num_samples: int,
+    ignore_eos: bool,
+) -> List[APIRequestSequence]:
+
+    dataset = load_and_preprocess_dataset(
+        dataset_name=dataset_name,
+        tokenizer_name=tokenizer_name,
+    )
+
+    req_seqs: List[APIRequestSequence] = []
+    for i, data in enumerate(dataset.to_iterable_dataset()):
+        requests: List[APIRequest] = []
+        output_texts: List[str] = []
+        for prompt, output, output_ids in zip(data['prompt'],
+                                              data['output'],
+                                              data['output_ids']):
+            request = APIRequest(
+                prompt=prompt,
+                num_samples=num_samples,
+                max_output_len=len(output_ids),
+                ignore_eos=ignore_eos,
+            )
+            requests.append(request)
+            output_texts.append(output)
+
+        req_seq = APIRequestSequence(requests=requests,
+                                     output_texts=output_texts)
+        req_seqs.append(req_seq)
+        if len(req_seqs) >= num_sessions:
+            break
+
+    return req_seqs

@@ -1,8 +1,10 @@
+import sys
 import json
 import os
 import subprocess
 import pandas as pd
 import numpy as np
+import importlib.util
 
 from loguru import logger
 from datasets import Dataset
@@ -67,6 +69,74 @@ def prepare_sharegpt():
     dataset.save_to_disk(output_path)
 
 
+def prepare_sharegpt_chat(tokenizer_name: str):
+    url = "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/HTML_cleaned_raw_dataset/sg_90k_part2_html_cleaned.json"
+
+    data_path = os.path.join(base_dir, "data")
+    dataset_path = os.path.join(data_path,
+                                "sharegpt_cleaned.json")
+
+    download_dataset(url, dataset_path)
+
+    tokenizer_type = get_tokenizer_type(tokenizer_name)
+
+    split_data_path = os.path.join(base_dir,
+                                   f"data/sharegpt_split_{tokenizer_type}")
+
+    if not os.path.exists(split_data_path):
+        logger.info("Preprocessing dataset...")
+        if importlib.util.find_spec("fastchat") is None:
+            logger.error(
+                "'fastchat' is rqeuired to preprocess 'ShareGPT' dataset, "
+                "but 'fastchat' is not installed.\n"
+                "Please install it with:\n"
+                "   pip install fastchat"
+                )
+            sys.exit(1)
+
+        subprocess.run(
+            ["python3", "-m", "fastchat.data.split_long_conversation",
+             "--in-file", dataset_path,
+             "--out-file", split_data_path,
+             "--model-name-or-path", tokenizer_name,
+             "--max-length", "16384"],
+            check=True,
+        )
+
+    with open(split_data_path, 'r', encoding='utf-8') as f:
+        raw_data = json.load(f)
+
+    data = []
+    for item in raw_data:
+        convs = item.get("conversations", [])
+        if (len(convs) < 2 or len(convs) % 2 != 0
+                or convs[0].get("from") != "human"):
+            continue
+
+        human_msgs = []
+        gpt_msgs = []
+        for conv in convs:
+            if conv.get("from") == "human":
+                human_msgs.append(conv.get("value", ""))
+            elif conv.get("from") == "gpt":
+                gpt_msgs.append(conv.get("value", ""))
+
+        if len(human_msgs) != len(gpt_msgs):
+            continue
+
+        data.append({
+            "id": item.get("id"),
+            "human": human_msgs,
+            "gpt": gpt_msgs
+        })
+
+    dataset = Dataset.from_list(data)
+
+    output_path = os.path.join(base_dir,
+                               f"datasets/sharegpt_chat_{tokenizer_type}")
+    dataset.save_to_disk(output_path)
+
+
 def prepare_azure(tokenizer_name: str, type: str):
     url = f"https://raw.githubusercontent.com/Azure/AzurePublicDataset/refs/heads/master/data/AzureLLMInferenceTrace_{type}.csv"
 
@@ -121,6 +191,8 @@ def prepare_azure(tokenizer_name: str, type: str):
 def prepare_dataset(dataset: str, tokenizer: str):
     if dataset == "sharegpt":
         prepare_sharegpt()
+    elif dataset == "sharegpt_chat":
+        prepare_sharegpt_chat(tokenizer)
     elif dataset == "azure_conv":
         prepare_azure(tokenizer, "conv")
     elif dataset == "azure_code":
