@@ -33,6 +33,8 @@ pub struct Sequence {
     pub append_token_times: Vec<u64>,
 
     pub ignore_eos: bool,
+
+    pub disable_cache: bool,
 }
 
 impl Sequence {
@@ -41,6 +43,7 @@ impl Sequence {
         token_ids: Vec<u32>,
         max_output_len: Option<usize>,
         ignore_eos: bool,
+        disable_cache: bool,
     ) -> Sequence {
         let seq_id = utils::random::generate_seq_id();
         let prompt_len = token_ids.len();
@@ -59,6 +62,7 @@ impl Sequence {
             filled_token_ids: Vec::new(),
             append_token_times: Vec::new(),
             ignore_eos,
+            disable_cache,
         }
     }
 

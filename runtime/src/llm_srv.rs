@@ -76,6 +76,7 @@ impl Llm for LLMService {
         let num_samples = generate_request.num_samples;
         let max_output_len = generate_request.max_output_len;
         let ignore_eos = generate_request.ignore_eos;
+        let disable_cache = generate_request.disable_cache;
 
         let output = self
             .engine
@@ -85,6 +86,7 @@ impl Llm for LLMService {
                 session_id,
                 max_output_len.map(|x| x as usize),
                 ignore_eos,
+                disable_cache,
             )
             .await
             .expect("Failed to generate");
@@ -107,6 +109,7 @@ impl Llm for LLMService {
         let num_samples = reserve_request.num_samples;
         let max_output_len = reserve_request.max_output_len;
         let ignore_eos = reserve_request.ignore_eos;
+        let disable_cache = reserve_request.disable_cache;
 
         let output = self
             .engine
@@ -116,6 +119,7 @@ impl Llm for LLMService {
                 session_id,
                 max_output_len.map(|x| x as usize),
                 ignore_eos,
+                disable_cache,
             )
             .await
             .expect("Failed to reserve request");

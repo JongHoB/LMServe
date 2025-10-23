@@ -73,6 +73,7 @@ def generate_requests(
     num_requests: int,
     num_samples: int,
     ignore_eos: bool,
+    disable_cache: bool,
 ) -> List[APIRequest]:
 
     dataset = load_and_preprocess_dataset(
@@ -93,6 +94,7 @@ def generate_requests(
             num_samples=num_samples,
             max_output_len=output_len,
             ignore_eos=ignore_eos,
+            disable_cache=disable_cache,
         )
         requests.append(request)
         if len(requests) >= num_requests:
@@ -105,6 +107,7 @@ def generate_trace(
     dataset_name: str,
     tokenizer_name: str,
     num_requests: int,
+    disable_cache: bool,
 ) -> Tuple[List[APIRequest], List[float]]:
 
     dataset = load_and_preprocess_dataset(
@@ -121,6 +124,7 @@ def generate_trace(
             num_samples=1,
             max_output_len=len(data['output_ids']),
             ignore_eos=True,
+            disable_cache=disable_cache,
         )
 
         requests.append(request)
@@ -141,6 +145,7 @@ def generate_radom_requests(
     max_seq_len: int,
     num_requests: int,
     num_samples: int,
+    disable_cache: bool,
 ) -> List[APIRequest]:
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -161,6 +166,7 @@ def generate_radom_requests(
             num_samples=num_samples,
             max_output_len=output_len,
             ignore_eos=True,
+            disable_cache=disable_cache,
         )
         requests.append(request)
 
@@ -173,6 +179,7 @@ def generate_chat_requests(
     num_sessions: int,
     num_samples: int,
     ignore_eos: bool,
+    disable_cache: bool,
 ) -> List[APIRequestSequence]:
 
     dataset = load_and_preprocess_dataset(
@@ -192,6 +199,7 @@ def generate_chat_requests(
                 num_samples=num_samples,
                 max_output_len=len(output_ids),
                 ignore_eos=ignore_eos,
+                disable_cache=disable_cache,
             )
             requests.append(request)
             output_texts.append(output)

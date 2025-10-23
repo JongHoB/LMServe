@@ -48,6 +48,7 @@ message GenerateRequest {
   uint32 num_samples = 3;
   optional uint64 max_output_len = 4;
   bool ignore_eos = 5;
+  bool disable_cache = 6;
 }
 
 message GenerateResponse {
@@ -62,6 +63,7 @@ message ReserveRequest {
   uint32 num_samples = 3;
   optional uint64 max_output_len = 4;
   bool ignore_eos = 5;
+  bool disable_cache = 6;
 }
 
 message ReserveResponse {

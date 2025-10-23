@@ -570,9 +570,15 @@ impl Scheduler {
 
     pub fn remove_task(&mut self, infer_task: &InferTask) {
         for seq in infer_task.get_seqs(SeqStatus::Finished) {
-            self.gpu_block_manager.free(seq.seq_id);
-            self.host_block_manager.free(seq.seq_id);
-            self.disk_block_manager.free(seq.seq_id);
+            if seq.disable_cache {
+                self.gpu_block_manager.free_and_drop_cache(seq.seq_id);
+                self.host_block_manager.free_and_drop_cache(seq.seq_id);
+                self.disk_block_manager.free_and_drop_cache(seq.seq_id);
+            } else {
+                self.gpu_block_manager.free(seq.seq_id);
+                self.host_block_manager.free(seq.seq_id);
+                self.disk_block_manager.free(seq.seq_id);
+            }
         }
     }
 

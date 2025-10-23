@@ -270,6 +270,7 @@ impl LlmRouter {
         let num_samples = request.num_samples;
         let max_output_len = request.max_output_len;
         let ignore_eos = request.ignore_eos;
+        let disable_cache = request.disable_cache;
 
         // TODO(jinu): Implement ReserveRequest::from_request()
         let reserve_req = ReserveRequest {
@@ -278,6 +279,7 @@ impl LlmRouter {
             num_samples,
             max_output_len,
             ignore_eos,
+            disable_cache,
         };
 
         let dst_node = self.scheduler.select(&request).await?;

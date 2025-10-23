@@ -29,6 +29,7 @@ def main(args):
                       (args.num_clients * args.num_skip_turns)),
         num_samples=args.num_samples,
         ignore_eos=not args.disable_ignore_eos,
+        disable_cache=args.disable_cache,
     )
 
     # Clear server-side cache before running benchmark.
@@ -92,6 +93,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--disable-ignore-eos", action="store_true")
+    parser.add_argument("--disable-cache", action="store_true")
     parser.add_argument("--print-output-text", action="store_true")
     parser.add_argument("--num-padding-requests", type=int, default=32)
     parser.add_argument("--num-skip-turns", type=int, default=10)

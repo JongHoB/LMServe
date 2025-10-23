@@ -18,6 +18,7 @@ class APIRequest(TypedDict):
     num_samples: int
     max_output_len: Optional[int]
     ignore_eos: bool
+    disable_cache: bool = True
 
 
 class APIResponse(TypedDict):

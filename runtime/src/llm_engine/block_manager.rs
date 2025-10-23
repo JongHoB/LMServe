@@ -639,10 +639,42 @@ impl BlockManager {
             });
     }
 
+    fn drop_cache(&mut self, block_id: u32) {
+        let block = self.block_allocator.get_block_mut(block_id);
+        if block.ref_cnt == 0 {
+            self.hash_block_table.remove(&block.get_hash());
+
+            block.clear();
+        }
+    }
+
+    /// Logically free all blocks associated with given sequence.
+    /// The blocks remain available for reuse; however, if memory pressure occurs,
+    /// they may be relaimed for other allocations.
     pub fn free(&mut self, seq_id: u64) {
+        if let Some(block_map) = self.seq_block_mapping_table.remove(&seq_id) {
+            let mut freed_token_cnt = 0;
+            for block_id in block_map.block_ids.iter() {
+                self.block_allocator.free_block(*block_id);
+
+                freed_token_cnt += self.block_size;
+
+                if freed_token_cnt > block_map.filled_token_len {
+                    self.drop_cache(*block_id);
+                }
+            }
+        }
+    }
+
+    /// Free all blocks associated with the given sequence.
+    /// This function also clears cached blocks that have no remaining references,
+    /// so they are no longer reused.
+    pub fn free_and_drop_cache(&mut self, seq_id: u64) {
         if let Some(block_map) = self.seq_block_mapping_table.remove(&seq_id) {
             for block_id in block_map.block_ids.iter() {
                 self.block_allocator.free_block(*block_id);
+
+                self.drop_cache(*block_id);
             }
         }
     }

@@ -28,6 +28,7 @@ pub struct GenerateParams {
     pub session_id: Option<String>,
     pub max_output_len: Option<u64>,
     pub ignore_eos: bool,
+    pub disable_cache: bool,
 }
 
 pub struct APIServer {
@@ -63,6 +64,7 @@ impl APIServer {
                 num_samples: params.num_samples as u32,
                 max_output_len: params.max_output_len,
                 ignore_eos: params.ignore_eos,
+                disable_cache: params.disable_cache,
             })
             .await?;
 

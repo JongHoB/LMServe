@@ -36,6 +36,7 @@ def main(args):
                 dataset_name=args.dataset,
                 tokenizer_name=args.tokenizer,
                 num_requests=num_requests,
+                disable_cache=args.disable_cache,
             )
         else:
             requests = generate_requests(
@@ -45,6 +46,7 @@ def main(args):
                 max_seq_len=args.max_seq_len,
                 num_samples=args.num_samples,
                 ignore_eos=not args.disable_ignore_eos,
+                disable_cache=args.disable_cache,
             )
     elif args.input_len is not None and args.output_len is not None:
         requests = generate_radom_requests(
@@ -54,6 +56,7 @@ def main(args):
             num_requests=num_requests,
             max_seq_len=args.max_seq_len,
             num_samples=args.num_samples,
+            disable_cache=args.disable_cache,
         )
     else:
         raise RuntimeError(
@@ -120,6 +123,7 @@ if __name__ == "__main__":
     parser.add_argument("--rate", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--disable-ignore-eos", action="store_true")
+    parser.add_argument("--disable-cache", action="store_true")
     parser.add_argument("--print-output-text", action="store_true")
     parser.add_argument("--num-padding-requests", type=int, default=32)
     parser.add_argument("--use-time", action="store_true")

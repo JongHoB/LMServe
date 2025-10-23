@@ -191,6 +191,7 @@ impl LLMEngine {
         session_id: String,
         max_output_len: Option<usize>,
         ignore_eos: bool,
+        disable_cache: bool,
     ) -> Result<()> {
         let arrival_time = utils::time::now_ns();
         let mut seqs: Vec<Sequence> = Vec::new();
@@ -200,6 +201,7 @@ impl LLMEngine {
                 input_ids.clone(),
                 max_output_len,
                 ignore_eos,
+                disable_cache,
             );
             seqs.push(seq);
         }
@@ -256,6 +258,7 @@ impl LLMEngine {
         session_id: String,
         max_output_len: Option<usize>,
         ignore_eos: bool,
+        disable_cache: bool,
     ) -> Result<(Option<String>, Vec<Bytes>, Vec<u64>)> {
         let mut seqs: Vec<Sequence> = Vec::new();
         for _ in 0..num_samples {
@@ -264,6 +267,7 @@ impl LLMEngine {
                 input_ids.clone(),
                 max_output_len,
                 ignore_eos,
+                disable_cache,
             );
             seqs.push(seq);
         }
@@ -522,6 +526,7 @@ impl LLMEngineWrapper {
         session_id: String,
         max_output_len: Option<usize>,
         ignore_eos: bool,
+        disable_cache: bool,
     ) -> Result<GenerateOutput> {
         let notify = Arc::new(Notify::new());
         self.request_events
@@ -536,6 +541,7 @@ impl LLMEngineWrapper {
                 session_id.clone(),
                 max_output_len,
                 ignore_eos,
+                disable_cache,
             )
             .await?;
 
@@ -559,6 +565,7 @@ impl LLMEngineWrapper {
         session_id: String,
         max_output_len: Option<usize>,
         ignore_eos: bool,
+        disable_cache: bool,
     ) -> Result<ReserveOutput> {
         let (region_id, kv_descs, hash_values) = self
             .engine
@@ -568,6 +575,7 @@ impl LLMEngineWrapper {
                 session_id,
                 max_output_len,
                 ignore_eos,
+                disable_cache,
             )
             .await?;
 
