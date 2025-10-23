@@ -501,7 +501,7 @@ impl LLMEngineWrapper {
             num_running_reqs: stats.num_running_reqs as u64,
             num_allocated_reqs: stats.num_allocated_reqs as u64,
             num_waiting_reqs: stats.num_waiting_reqs as u64,
-            num_pendding_reqs: stats.num_pendding_reqs as u64,
+            num_pending_reqs: stats.num_pending_reqs as u64,
             gpu_kv_block_usage: stats.gpu_kv_block_usage,
             host_kv_block_usage: stats.host_kv_block_usage,
         };

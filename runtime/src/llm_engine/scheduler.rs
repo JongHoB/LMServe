@@ -54,7 +54,7 @@ pub struct Scheduler {
     waiting: VecDeque<InferTask>,
     allocated: VecDeque<InferTask>,
     // HashMap<session_id>, infer_task>
-    pendding: HashMap<String, InferTask>,
+    pending: HashMap<String, InferTask>,
 
     running_batch: HashMap<u64, BatchEntry>,
 
@@ -81,14 +81,14 @@ impl Scheduler {
             watermark_blocks: 0.97,
             waiting: VecDeque::new(),
             allocated: VecDeque::new(),
-            pendding: HashMap::new(),
+            pending: HashMap::new(),
             running_batch: HashMap::new(),
             last_log_time: 0,
         }
     }
 
     pub fn is_task_queue_empty(&self) -> bool {
-        self.allocated.is_empty() && self.waiting.is_empty() && self.pendding.is_empty()
+        self.allocated.is_empty() && self.waiting.is_empty() && self.pending.is_empty()
     }
 
     pub fn add(&mut self, infer_task: InferTask) {
@@ -144,7 +144,7 @@ impl Scheduler {
 
     pub fn pend(&mut self, infer_task: InferTask) {
         let old = self
-            .pendding
+            .pending
             .insert(infer_task.get_session_id(), infer_task);
         if old.is_some() {
             panic!("A duplicate session id is already pending");
@@ -158,7 +158,7 @@ impl Scheduler {
         hash_values: &[u64],
     ) {
         let infer_task = self
-            .pendding
+            .pending
             .remove(&session_id)
             .unwrap_or_else(|| panic!("no pending task found for session_id: {}", session_id));
 
@@ -592,7 +592,20 @@ impl Scheduler {
         let num_running_reqs: usize = self.running_batch.len();
         let num_allocated_reqs: usize = self.allocated.len();
         let num_waiting_reqs: usize = self.waiting.len();
-        let num_pendding_reqs: usize = self.pendding.len();
+        let num_pending_reqs: usize = self.pending.len();
+
+        let num_promoted_reqs: usize = {
+            let head_arrival_time = self
+                .waiting
+                .get(0)
+                .map_or(u64::MAX, |t| t.get_arrival_time());
+
+            self.allocated
+                .iter()
+                .filter(|t| t.get_arrival_time() > head_arrival_time)
+                .count()
+        };
+
         let gpu_kv_block_usage: f32 = self.gpu_block_manager.get_block_usage();
         let host_kv_block_usage: f32 = self.host_block_manager.get_block_usage();
 
@@ -600,7 +613,8 @@ impl Scheduler {
             num_running_reqs,
             num_allocated_reqs,
             num_waiting_reqs,
-            num_pendding_reqs,
+            num_pending_reqs,
+            num_promoted_reqs,
             gpu_kv_block_usage,
             host_kv_block_usage,
         }

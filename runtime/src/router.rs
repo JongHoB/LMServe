@@ -157,8 +157,8 @@ impl NodeScheduler for LoadBalanceNodeScheduler {
         let id: &str = stats_map
             .iter()
             .min_by(|a, b| {
-                let num_wait_reqs_a = a.1.num_waiting_reqs + a.1.num_pendding_reqs;
-                let num_wait_reqs_b = b.1.num_waiting_reqs + b.1.num_pendding_reqs;
+                let num_wait_reqs_a = a.1.num_waiting_reqs + a.1.num_pending_reqs;
+                let num_wait_reqs_b = b.1.num_waiting_reqs + b.1.num_pending_reqs;
 
                 let gpu_kv_usage_a = a.1.gpu_kv_block_usage;
                 let gpu_kv_usage_b = b.1.gpu_kv_block_usage;

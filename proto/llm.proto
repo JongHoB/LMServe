@@ -33,7 +33,7 @@ message EngineStats {
   uint64 num_running_reqs = 1;
   uint64 num_allocated_reqs = 2;
   uint64 num_waiting_reqs = 3;
-  uint64 num_pendding_reqs = 4;
+  uint64 num_pending_reqs = 4;
   float gpu_kv_block_usage = 5;
   float host_kv_block_usage = 6;
 }
