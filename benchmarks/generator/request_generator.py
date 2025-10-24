@@ -83,22 +83,23 @@ def generate_requests(
     )
 
     requests: List[APIRequest] = []
-    for data in dataset.to_iterable_dataset():
-        input_len = len(data['input_ids'])
-        output_len = len(data['output_ids'])
-        if (output_len <= 4) or ((input_len + output_len) > max_seq_len):
-            continue
+    while len(requests) < num_requests:
+        for data in dataset.to_iterable_dataset():
+            input_len = len(data['input_ids'])
+            output_len = len(data['output_ids'])
+            if (output_len <= 4) or ((input_len + output_len) > max_seq_len):
+                continue
 
-        request = APIRequest(
-            prompt=data['prompt'],
-            num_samples=num_samples,
-            max_output_len=output_len,
-            ignore_eos=ignore_eos,
-            disable_cache=disable_cache,
-        )
-        requests.append(request)
-        if len(requests) >= num_requests:
-            break
+            request = APIRequest(
+                prompt=data['prompt'],
+                num_samples=num_samples,
+                max_output_len=output_len,
+                ignore_eos=ignore_eos,
+                disable_cache=disable_cache,
+            )
+            requests.append(request)
+            if len(requests) >= num_requests:
+                break
 
     return requests
 
