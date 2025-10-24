@@ -37,3 +37,8 @@ tokenizers = "0.20"
 tokio-stream = "0.1.17"
 tonic-build = "0.13"
 uuid = "1.17.0"
+
+[profile.dev]
+opt-level = 3
+debug = true
+overflow-checks = true

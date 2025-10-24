@@ -1,15 +1,23 @@
 BIN_DIR    := bin
-TARGET_DIR := target/release
 PACKAGES   := runtime clis
 BINARIES   := llm_srv api_server llm_clu
+MAKEFLAGS += --no-print-directory
 
-.PHONY: all build copy-bins clean
+# Default setting
+TARGET_DIR := target/debug
+MODE := debug
+
+.PHONY: all release build clean link-bins build-% build-worker install-worker
 
 all: develop
 
-develop: $(addprefix build-,$(PACKAGES)) build-worker copy-bins
+develop: MODE := debug
+develop: TARGET_DIR := target/debug
+develop: $(addprefix build-,$(PACKAGES)) build-worker link-bins
 
-install: $(addprefix install-,$(PACKAGES)) install-worker copy-bins
+release: MODE := release
+release: TARGET_DIR := target/release
+release: $(addprefix build-,$(PACKAGES)) install-worker link-bins
 
 build-worker:
 	@$(MAKE) -C runtime/worker build-dev
@@ -18,17 +26,21 @@ install-worker:
 	@$(MAKE) -C runtime/worker install
 
 build-%:
-	@echo "Building $*..."
-	cargo build -p $* --release --locked
+	@echo "Building $* in $(MODE) mode..."
+	@if [ "$(MODE)" = "release" ]; then \
+		cargo build -p $* --release --frozen; \
+	else \
+		cargo build -p $* --locked; \
+	fi
 
-copy-bins:
+link-bins:
 	@mkdir -p $(BIN_DIR)
 	@for bin in $(BINARIES); do \
-		echo "Copying $$bin to $(BIN_DIR)/"; \
-		cp $(TARGET_DIR)/$$bin $(BIN_DIR)/; \
+		echo "Linking $(TARGET_DIR)/$$bin -> $(BIN_DIR)/$$bin"; \
+		ln -sf $(CURDIR)/$(TARGET_DIR)/$$bin $(BIN_DIR)/$$bin; \
 	done
 
 clean:
 	cargo clean
 	@rm -rf $(BIN_DIR)
-	@$(MAKE) -C worker clean
+	@$(MAKE) -C runtime/worker clean
