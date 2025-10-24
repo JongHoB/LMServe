@@ -2170,6 +2170,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "axum",
+ "clap",
  "futures",
  "hyper-util",
  "linked_hash_set",

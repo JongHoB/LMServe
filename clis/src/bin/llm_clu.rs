@@ -10,7 +10,8 @@ use serde_json::Value;
 use tracing::info;
 
 use clis::args::{APIServerArgs, CLIArgs, LLMSrvArgs};
-use clis::configs::{APIServerConfig, ControllerConfig, LLMCluConfig, LLMSrvConfig};
+use clis::configs::{APIServerConfig, LLMCluConfig, LLMSrvConfig};
+use runtime::configs::{ControllerConfig, EngineConfig};
 use runtime::types;
 
 fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
@@ -20,15 +21,11 @@ fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
     obj.iter()
         .filter_map(|(k, v)| {
             let key = k.replace("_", "-");
-            if let Value::Bool(b) = v {
-                return match b {
-                    true => Some(format!("--{}", key)),
-                    false => None,
-                };
-            }
-
-            let val = match v {
-                Value::String(s) => s.clone(),
+            match v {
+                Value::Bool(false) => None,
+                Value::Bool(true) => Some(format!("--{}", key)),
+                Value::Number(n) => Some(format!("--{}={}", key, n)),
+                Value::String(s) => Some(format!("--{}={}", key, s)),
                 Value::Array(vec) => {
                     let vec: Vec<String> = vec
                         .iter()
@@ -37,11 +34,10 @@ fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
                             _ => v.to_string(),
                         })
                         .collect();
-                    vec.join(" ")
+                    Some(format!("--{}={}", key, vec.join(" ")))
                 }
-                _ => v.to_string(),
-            };
-            Some(format!("--{}={}", key, val))
+                _ => Some(format!("--{}={}", key, v)),
+            }
         })
         .collect()
 }
@@ -73,65 +69,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             let api_server_config = APIServerConfig {
-                address: args.address.clone(),
+                api_address: args.api_address.clone(),
             };
 
-            let controller_config = ControllerConfig {
-                route_policy: args.route_policy,
-                nats_uri: args.nats_uri.clone(),
-            };
+            let controller_config: ControllerConfig =
+                serde_yaml::from_value(serde_yaml::to_value(&args)?)?;
 
-            let llm_server_configs = (0..args.num_worker_groups)
-                .map(|i| {
-                    let port = LLMSERVE_BASE_PORT + i;
+            let mut llm_server_configs = Vec::with_capacity(args.num_worker_groups as usize);
+            for i in 0..args.num_worker_groups {
+                let port = LLMSERVE_BASE_PORT + i;
 
-                    LLMSrvConfig {
-                        kind: types::EngineKind::All,
-                        block_size: args.block_size,
-                        gpu_memory_fraction: args.gpu_memory_fraction,
-                        host_kv_cache_size: args.host_kv_cache_size,
-                        disk_kv_cache_size: args.disk_kv_cache_size,
-                        disk_kv_cache_path: args.disk_kv_cache_path.clone(),
-                        enable_reorder: args.enable_reorder,
-                        max_batch_size: args.max_batch_size,
-                        max_seq_len: args.max_seq_len,
-                        max_num_batched_tokens: args.max_num_batched_tokens,
-                        tp_size: args.tp_size,
-                        address: format!("127.0.0.1:{port}"),
-                    }
-                })
-                .collect();
+                let engine_config: EngineConfig =
+                    serde_yaml::from_value(serde_yaml::to_value(&args)?)?;
+
+                llm_server_configs.push(LLMSrvConfig {
+                    kind: types::EngineKind::All,
+                    address: format!("127.0.0.1:{port}"),
+                    engine: engine_config,
+                });
+            }
 
             LLMCluConfig {
                 model_name: args.model_name,
                 api_server: api_server_config,
                 controller: controller_config,
                 llm_servers: llm_server_configs,
+                nats_uri: args.nats_uri.clone(),
             }
         }
     };
 
     let model_name = config.model_name;
-    let nats_uri = config.controller.nats_uri;
+    let nats_uri = args.nats_uri.clone();
 
     let mut device_offset: u8 = 0;
     let mut llm_servers: Vec<Child> = Vec::with_capacity(config.llm_servers.len() as usize);
     for (group_id, llm_server) in config.llm_servers.iter().enumerate() {
-        let devices: Vec<u8> = (device_offset..(device_offset + llm_server.tp_size)).collect();
+        let devices: Vec<u8> =
+            (device_offset..(device_offset + llm_server.engine.tp_size)).collect();
 
         let llm_srv_args = LLMSrvArgs {
             kind: llm_server.kind,
             model_name: model_name.clone(),
-            block_size: llm_server.block_size,
-            gpu_memory_fraction: llm_server.gpu_memory_fraction,
-            host_kv_cache_size: llm_server.host_kv_cache_size,
-            disk_kv_cache_size: llm_server.disk_kv_cache_size,
-            disk_kv_cache_path: llm_server.disk_kv_cache_path.clone(),
-            enable_reorder: llm_server.enable_reorder,
-            max_batch_size: llm_server.max_batch_size,
-            max_seq_len: llm_server.max_seq_len,
-            max_num_batched_tokens: llm_server.max_num_batched_tokens,
-            tp_size: llm_server.tp_size,
+            engine: llm_server.engine.clone(),
             address: llm_server.address.clone(),
             devices: Some(devices),
             nats_uri: nats_uri.clone(),
@@ -144,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .spawn()?;
 
         llm_servers.push(engine);
-        device_offset += llm_server.tp_size;
+        device_offset += llm_server.engine.tp_size;
     }
 
     let llm_server_addresses = config
@@ -155,9 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api_server_args = APIServerArgs {
         model_name: model_name.clone(),
-        route_policy: config.controller.route_policy,
-        address: config.api_server.address,
+        controller: config.controller,
         llm_server_addresses,
+        api_address: config.api_server.api_address,
         nats_uri: nats_uri.clone(),
     };
 

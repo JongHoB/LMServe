@@ -50,13 +50,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _root_guard = root_span.clone().entered();
 
     let group_id = env::var("GROUP_ID").unwrap_or(String::from("0"));
-    let devices = args.devices.unwrap_or((0..args.tp_size).collect());
+    let devices = args.devices.clone().unwrap_or((0..args.engine.tp_size).collect());
 
     let worker_group_uds_path = format!("{}-{}", WORKER_GROUP_UDS_PATH_PREFIX, group_id);
     let worker_port = random_available_port(6000..7000).expect("Not found available port");
 
     let mut workers: Vec<Child> = Vec::new();
-    for (device, rank) in devices.iter().zip(0..args.tp_size) {
+    for (device, rank) in devices.iter().zip(0..args.engine.tp_size) {
         let uds_path = format!("{}/model-{}", worker_group_uds_path, rank);
 
         std::fs::create_dir_all(Path::new(&uds_path).parent().unwrap())?;
@@ -67,14 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let worker_args = vec![
             args.model_name.clone(),
-            args.block_size.to_string(),
+            args.engine.block_size.to_string(),
             device.to_string(),
             uds_path.to_string(),
         ];
 
         let mut worker_envs = HashMap::new();
         worker_envs.insert("RANK", rank.to_string());
-        worker_envs.insert("WORLD_SIZE", args.tp_size.to_string());
+        worker_envs.insert("WORLD_SIZE", args.engine.tp_size.to_string());
         worker_envs.insert("MASTER_ADDR", address.ip().to_string());
         worker_envs.insert("MASTER_PORT", worker_port.to_string());
 
@@ -87,25 +87,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workers.push(worker);
     }
 
-    let disk_kv_cache_path = format!("{}/group-{}", args.disk_kv_cache_path, group_id);
-    if args.disk_kv_cache_size > 0 {
+    let disk_kv_cache_path = format!("{}/group-{}", args.engine.disk_kv_cache_path, group_id);
+    if args.engine.disk_kv_cache_size > 0 {
         std::fs::create_dir_all(Path::new(&disk_kv_cache_path))?;
     }
 
     let engine = Arc::new(
         LLMEngineWrapper::new(
             group_id,
-            args.model_name,
-            args.block_size,
-            args.gpu_memory_fraction,
-            args.host_kv_cache_size,
-            args.disk_kv_cache_size,
-            disk_kv_cache_path,
-            args.enable_reorder,
-            args.max_batch_size,
-            args.max_seq_len,
-            args.max_num_batched_tokens,
-            args.tp_size,
+            args.engine,
             worker_group_uds_path,
             args.nats_uri,
         )

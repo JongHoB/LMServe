@@ -194,9 +194,7 @@ impl Scheduler {
     }
 
     pub fn pend(&mut self, infer_task: InferTask) {
-        let old = self
-            .pending
-            .insert(infer_task.get_session_id(), infer_task);
+        let old = self.pending.insert(infer_task.get_session_id(), infer_task);
         if old.is_some() {
             panic!("A duplicate session id is already pending");
         }

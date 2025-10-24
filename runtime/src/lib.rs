@@ -6,3 +6,4 @@ pub mod pb;
 pub mod router;
 pub mod stats;
 pub mod types;
+pub mod configs;

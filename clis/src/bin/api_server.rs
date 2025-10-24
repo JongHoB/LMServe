@@ -94,14 +94,14 @@ async fn main() -> Result<()> {
 
     let args = APIServerArgs::parse();
 
-    let socket_addr = args.address;
+    let socket_addr = args.api_address;
 
     let url = format!("http://{}", socket_addr);
 
     let tokenizer =
         get_tokenizer(&args.model_name).unwrap_or_else(|e| panic!("Failed to load tokenizer: {e}"));
 
-    let controller: Controller = Controller::new(args.route_policy, args.nats_uri).await;
+    let controller: Controller = Controller::new(args.controller, args.nats_uri).await;
     for addr in args.llm_server_addresses.iter() {
         let llm_server_url = format!("http://{}", addr);
         controller

@@ -18,6 +18,7 @@ use crate::pb::llm::{
 };
 use crate::stats::Stats;
 use crate::types::{EngineKind, RoutePolicy};
+use crate::configs::ControllerConfig;
 
 struct Node {
     id: String,
@@ -337,7 +338,9 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub async fn new(policy: RoutePolicy, nats_uri: String) -> Self {
+    pub async fn new(controller_config: ControllerConfig, nats_uri: String) -> Self {
+        let policy = controller_config.route_policy;
+
         let monitor = match StatsMonitor::start(&nats_uri) {
             Ok(mon) => Some(mon),
             Err(e) => {

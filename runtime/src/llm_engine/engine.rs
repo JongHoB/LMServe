@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
 
 use crate::background_manager::BackgroundTaskManager;
+use crate::configs::EngineConfig;
 use crate::stats::Stats;
 
 use super::Bytes;
@@ -16,17 +17,8 @@ use super::scheduler::{Device, Scheduler};
 use super::sequence::Sequence;
 use super::worker::{KVWorkerGroup, ModelWorkerGroup};
 
-#[allow(dead_code)]
 pub struct LLMEngine {
     id: String,
-    model_name: String,
-    block_size: usize,
-    gpu_memory_fraction: f32,
-    max_batch_size: usize,
-    max_seq_len: usize,
-    max_num_batched_tokens: usize,
-
-    tp_size: u8,
 
     model_worker_group: ModelWorkerGroup,
     kv_worker_group: KVWorkerGroup,
@@ -45,20 +37,21 @@ pub struct LLMEngine {
 impl LLMEngine {
     pub async fn new(
         id: String,
-        model_name: String,
-        block_size: usize,
-        gpu_memory_fraction: f32,
-        host_cache_size: usize,
-        disk_cache_size: usize,
-        disk_cache_path: String,
-        enable_reorder: bool,
-        max_batch_size: usize,
-        max_seq_len: usize,
-        max_num_batched_tokens: usize,
-        tp_size: u8,
+        engine_config: EngineConfig,
         worker_group_uds_path: String,
         nats_uri: String,
     ) -> Result<LLMEngine> {
+        let tp_size = engine_config.tp_size;
+
+        let gpu_memory_fraction = engine_config.gpu_memory_fraction;
+        let host_cache_size = engine_config.host_kv_cache_size;
+        let disk_cache_size = engine_config.disk_kv_cache_size;
+        let disk_cache_path = engine_config.disk_kv_cache_path;
+
+        let max_batch_size = engine_config.max_batch_size;
+        let max_seq_len = engine_config.max_seq_len;
+        let max_num_batched_tokens = engine_config.max_num_batched_tokens;
+
         let model_worker_group = ModelWorkerGroup::init(tp_size, worker_group_uds_path.clone())
             .await
             .unwrap_or_else(|e| panic!("Failed to initialize model worker group: {e}"));
@@ -135,11 +128,11 @@ impl LLMEngine {
             max_batch_size,
             max_seq_len,
             max_num_batched_tokens,
-            block_size,
+            engine_config.block_size,
             num_gpu_blocks as usize,
             num_host_blocks as usize,
             num_disk_blocks as usize,
-            enable_reorder,
+            engine_config.enable_reorder,
         );
 
         info!("{:?}", scheduler);
@@ -154,13 +147,6 @@ impl LLMEngine {
 
         Ok(LLMEngine {
             id,
-            model_name,
-            block_size,
-            gpu_memory_fraction,
-            max_batch_size,
-            max_seq_len,
-            max_num_batched_tokens,
-            tp_size,
             model_worker_group,
             kv_worker_group,
             kv_disk_worker_group: Arc::new(kv_disk_worker_group),
@@ -458,33 +444,13 @@ pub struct LLMEngineWrapper {
 impl LLMEngineWrapper {
     pub async fn new(
         id: String,
-        model_name: String,
-        block_size: usize,
-        gpu_memory_fraction: f32,
-        host_kv_cache_size: usize,
-        disk_kv_cache_size: usize,
-        disk_kv_cache_path: String,
-        enable_reorder: bool,
-        max_batch_size: usize,
-        max_seq_len: usize,
-        max_num_batched_tokens: usize,
-        tp_size: u8,
+        engine_config: EngineConfig,
         worker_group_uds_path: String,
         nats_uri: String,
     ) -> Result<LLMEngineWrapper> {
         let llm_engine = LLMEngine::new(
             id,
-            model_name,
-            block_size,
-            gpu_memory_fraction,
-            host_kv_cache_size,
-            disk_kv_cache_size,
-            disk_kv_cache_path,
-            enable_reorder,
-            max_batch_size,
-            max_seq_len,
-            max_num_batched_tokens,
-            tp_size,
+            engine_config,
             worker_group_uds_path,
             nats_uri,
         )

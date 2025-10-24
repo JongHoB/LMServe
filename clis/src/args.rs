@@ -1,8 +1,10 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::configs;
+use runtime::configs::{ControllerConfig, EngineConfig};
 use runtime::types;
+
+use crate::configs;
 
 #[derive(Parser, Debug, Serialize)]
 #[command(author, version, about)]
@@ -10,75 +12,49 @@ pub struct CLIArgs {
     #[arg(long)]
     pub config: Option<String>,
 
-    #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
+    #[arg(long, default_value_t = configs::default_model_name())]
     pub model_name: String,
 
-    #[arg(long, default_value_t = configs::default_route_policy())]
-    pub route_policy: types::RoutePolicy,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub controller: ControllerConfig,
 
-    #[arg(long, default_value_t = configs::default_block_size())]
-    pub block_size: usize,
-
-    /// Fraction of total GPU memory to use (0.0 ~ 1.0)
-    #[arg(long, default_value_t = configs::default_gpu_memory_fraction())]
-    pub gpu_memory_fraction: f32,
-
-    // Host-side KV cache size in GB
-    #[arg(long, default_value_t = configs::default_host_kv_cache_size())]
-    pub host_kv_cache_size: usize,
-
-    #[arg(long, default_value_t = configs::default_disk_kv_cache_size())]
-    pub disk_kv_cache_size: usize,
-
-    #[arg(long, default_value_t = configs::default_disk_kv_cache_path())]
-    pub disk_kv_cache_path: String,
-
-    #[arg(long, default_value_t = configs::default_enable_reorder())]
-    pub enable_reorder: bool,
-
-    #[arg(long, default_value_t = configs::default_max_batch_size())]
-    pub max_batch_size: usize,
-
-    #[arg(long, default_value_t = configs::default_max_seq_len())]
-    pub max_seq_len: usize,
-
-    #[arg(long, default_value_t = configs::default_max_num_batched_tokens())]
-    pub max_num_batched_tokens: usize,
-
-    #[arg(long, default_value_t = configs::default_tp_size())]
-    pub tp_size: u8,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub engine: EngineConfig,
 
     #[arg(long, default_value_t = 1)]
     pub num_worker_groups: u32,
 
-    #[arg(long, default_value = "127.0.0.1:8000")]
-    pub address: String,
+    #[arg(long, default_value_t = configs::default_api_address())]
+    pub api_address: String,
 
-    #[arg(long, default_value = "nats://127.0.0.1:4222")]
+    #[arg(long, default_value_t = configs::default_nats_uri())]
     pub nats_uri: String,
 }
 
 #[derive(Parser, Debug, Serialize, Deserialize)]
 #[command(author, version, about)]
 pub struct APIServerArgs {
-    #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
+    #[arg(long, default_value_t = configs::default_model_name())]
     pub model_name: String,
 
-    #[arg(long, default_value_t = configs::default_route_policy())]
-    pub route_policy: types::RoutePolicy,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub controller: ControllerConfig,
 
-    #[arg(long, default_value = "127.0.0.1:8000")]
-    pub address: String,
+    #[arg(long, default_value_t = configs::default_api_address())]
+    pub api_address: String,
 
     #[arg(
         long,
         value_delimiter = ' ',
         num_args = 1..,
-        default_values_t = vec!["127.0.0.1:7000".to_string()]
+        default_values_t = vec![configs::default_srv_address()]
     )]
     pub llm_server_addresses: Vec<String>,
 
-    #[arg(long, default_value = "nats://127.0.0.1:4222")]
+    #[arg(long, default_value_t = configs::default_nats_uri())]
     pub nats_uri: String,
 }
 
@@ -88,47 +64,19 @@ pub struct LLMSrvArgs {
     #[arg(long, default_value = "all")]
     pub kind: types::EngineKind,
 
-    #[arg(long, default_value = "Qwen/Qwen2.5-0.5B")]
+    #[arg(long, default_value_t = configs::default_model_name())]
     pub model_name: String,
 
-    #[arg(long, default_value_t = configs::default_block_size())]
-    pub block_size: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub engine: EngineConfig,
 
-    /// Fraction of total GPU memory to use (0.0 ~ 1.0)
-    #[arg(long, default_value_t = configs::default_gpu_memory_fraction())]
-    pub gpu_memory_fraction: f32,
-
-    // Host-side KV cache size in GB
-    #[arg(long, default_value_t = configs::default_host_kv_cache_size())]
-    pub host_kv_cache_size: usize,
-
-    #[arg(long, default_value_t = configs::default_disk_kv_cache_size())]
-    pub disk_kv_cache_size: usize,
-
-    #[arg(long, default_value_t = configs::default_disk_kv_cache_path())]
-    pub disk_kv_cache_path: String,
-
-    #[arg(long, default_value_t = configs::default_enable_reorder())]
-    pub enable_reorder: bool,
-
-    #[arg(long, default_value_t = configs::default_max_batch_size())]
-    pub max_batch_size: usize,
-
-    #[arg(long, default_value_t = configs::default_max_seq_len())]
-    pub max_seq_len: usize,
-
-    #[arg(long, default_value_t = configs::default_max_num_batched_tokens())]
-    pub max_num_batched_tokens: usize,
-
-    #[arg(long, default_value_t = configs::default_tp_size())]
-    pub tp_size: u8,
-
-    #[arg(long, default_value = "127.0.0.1:7000")]
+    #[arg(long, default_value_t = configs::default_srv_address())]
     pub address: String,
 
     #[arg(long, value_delimiter = ' ')]
     pub devices: Option<Vec<u8>>,
 
-    #[arg(long, default_value = "nats://127.0.0.1:4222")]
+    #[arg(long, default_value_t = configs::default_srv_address())]
     pub nats_uri: String,
 }
