@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use crate::background_manager::BackgroundTaskManager;
 use crate::configs::EngineConfig;
+use crate::pb::llm::GenerateRequest;
 use crate::stats::Stats;
 
 use super::Bytes;
@@ -31,7 +32,7 @@ pub struct LLMEngine {
 
     scheduler: Arc<Mutex<Scheduler>>,
 
-    bg_mgr: Arc<BackgroundTaskManager>,
+    background_manager: Arc<BackgroundTaskManager>,
 }
 
 impl LLMEngine {
@@ -154,7 +155,7 @@ impl LLMEngine {
             nats_client,
             local_kv_agent_metadata,
             scheduler: Arc::new(Mutex::new(scheduler)),
-            bg_mgr: BackgroundTaskManager::new(),
+            background_manager: BackgroundTaskManager::new(),
         })
     }
 
@@ -174,24 +175,18 @@ impl LLMEngine {
         }
     }
 
-    async fn add_request(
-        &self,
-        input_ids: Vec<u32>,
-        num_samples: u16,
-        session_id: String,
-        max_output_len: Option<usize>,
-        ignore_eos: bool,
-        disable_cache: bool,
-    ) -> Result<()> {
+    async fn add_request(&self, request: GenerateRequest) -> Result<()> {
         let arrival_time = utils::time::now_ns();
+
+        let session_id = request.session_id.clone();
         let mut seqs: Vec<Sequence> = Vec::new();
-        for _ in 0..num_samples {
+        for _ in 0..request.num_samples {
             let seq = Sequence::new(
                 session_id.clone(),
-                input_ids.clone(),
-                max_output_len,
-                ignore_eos,
-                disable_cache,
+                request.input_ids.clone(),
+                request.max_output_len.map(|x| x as usize),
+                request.ignore_eos,
+                request.disable_cache,
             );
             seqs.push(seq);
         }
@@ -226,7 +221,9 @@ impl LLMEngine {
                         }
                     };
 
-                    self.bg_mgr.clone().submit(swap_in_task, callback);
+                    self.background_manager
+                        .clone()
+                        .submit(swap_in_task, callback);
                 }
                 None => {
                     scheduler_guard.add(infer_task);
@@ -361,7 +358,9 @@ impl LLMEngine {
                         }
                     };
 
-                    self.bg_mgr.clone().submit(swap_out_task, callback);
+                    self.background_manager
+                        .clone()
+                        .submit(swap_out_task, callback);
                 }
                 scheduler_guard.remove_task(task);
             }
@@ -422,7 +421,7 @@ impl LLMEngine {
                 let mut scheduler_guard = self.scheduler.lock().await;
 
                 if scheduler_guard.is_task_queue_empty() {
-                    self.bg_mgr.clone().wait().await;
+                    self.background_manager.clone().wait().await;
                     scheduler_guard.clear_cache();
                     break;
                 }
@@ -448,13 +447,7 @@ impl LLMEngineWrapper {
         worker_group_uds_path: String,
         nats_uri: String,
     ) -> Result<LLMEngineWrapper> {
-        let llm_engine = LLMEngine::new(
-            id,
-            engine_config,
-            worker_group_uds_path,
-            nats_uri,
-        )
-        .await?;
+        let llm_engine = LLMEngine::new(id, engine_config, worker_group_uds_path, nats_uri).await?;
 
         Ok(LLMEngineWrapper {
             engine: Arc::new(llm_engine),
@@ -491,31 +484,15 @@ impl LLMEngineWrapper {
         Ok(())
     }
 
-    pub async fn generate(
-        &self,
-        input_ids: Vec<u32>,
-        num_samples: u16,
-        session_id: String,
-        max_output_len: Option<usize>,
-        ignore_eos: bool,
-        disable_cache: bool,
-    ) -> Result<GenerateOutput> {
+    pub async fn generate(&self, request: GenerateRequest) -> Result<GenerateOutput> {
         let notify = Arc::new(Notify::new());
+        let session_id = request.session_id.clone();
         self.request_events
             .lock()
             .await
             .insert(session_id.clone(), notify.clone());
 
-        self.engine
-            .add_request(
-                input_ids,
-                num_samples,
-                session_id.clone(),
-                max_output_len,
-                ignore_eos,
-                disable_cache,
-            )
-            .await?;
+        self.engine.add_request(request).await?;
 
         notify.notified().await;
 

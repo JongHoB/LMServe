@@ -109,6 +109,7 @@ impl std::fmt::Debug for Scheduler {
 }
 
 impl Scheduler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_batch_size: usize,
         max_seq_len: usize,

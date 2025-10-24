@@ -69,25 +69,10 @@ impl Llm for LLMService {
         &self,
         request: Request<GenerateRequest>,
     ) -> Result<Response<GenerateResponse>, Status> {
-        let generate_request = request.into_inner();
-
-        let session_id = generate_request.session_id;
-        let input_ids = generate_request.input_ids;
-        let num_samples = generate_request.num_samples;
-        let max_output_len = generate_request.max_output_len;
-        let ignore_eos = generate_request.ignore_eos;
-        let disable_cache = generate_request.disable_cache;
 
         let output = self
             .engine
-            .generate(
-                input_ids,
-                num_samples as u16,
-                session_id,
-                max_output_len.map(|x| x as usize),
-                ignore_eos,
-                disable_cache,
-            )
+            .generate(request.into_inner())
             .await
             .expect("Failed to generate");
 
