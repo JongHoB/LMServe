@@ -251,9 +251,7 @@ impl Scheduler {
         let mut num_reclaimable_blocks = 0;
         let block_manager = self.get_block_manager(&device);
         for seq in infer_task.get_active_seqs() {
-            let num_shared_blocks = block_manager.get_num_sharable_blocks(&seq.token_ids);
-            let num_allocated_blocks = block_manager.get_num_allocated_blocks(seq.seq_id);
-            let num_unique_blocks = num_allocated_blocks - num_shared_blocks;
+            let num_unique_blocks = block_manager.get_num_allocated_unique_blocks(seq.seq_id);
 
             num_reclaimable_blocks += num_unique_blocks;
         }

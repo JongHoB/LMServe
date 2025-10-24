@@ -279,13 +279,19 @@ impl BlockManager {
     }
 
     pub fn get_num_required_blocks(&self, seq: &Sequence) -> usize {
-        let num_allocated_blocks = self.get_num_allocated_blocks(seq.seq_id);
-        let num_sharable_blocks = self.get_num_sharable_blocks(&seq.token_ids);
-
         let total_token_len = seq.token_ids.len();
         let num_total_blocks = total_token_len.div_ceil(self.block_size);
 
-        num_total_blocks - num_allocated_blocks.max(num_sharable_blocks)
+        match self.seq_block_mapping_table.get(&seq.seq_id) {
+            Some(_) => {
+                let num_allocated_blocks = self.get_num_allocated_blocks(seq.seq_id);
+                num_total_blocks - num_allocated_blocks
+            }
+            None => {
+                let num_cached_prefix_blocks = self.get_prefix_cache_blocks(&seq.token_ids).len();
+                num_total_blocks - num_cached_prefix_blocks
+            }
+        }
     }
 
     pub fn get_num_allocated_blocks(&self, seq_id: u64) -> usize {
@@ -294,11 +300,15 @@ impl BlockManager {
             .map_or(0, |block_map| block_map.block_ids.len())
     }
 
-    pub fn get_num_sharable_blocks(&self, token_ids: &[u32]) -> usize {
-        self.get_prefix_cache_blocks(token_ids)
-            .iter()
-            .filter(|&b_id| self.block_allocator.get_block(*b_id).ref_cnt > 0)
-            .count()
+    pub fn get_num_allocated_unique_blocks(&self, seq_id: u64) -> usize {
+        match self.seq_block_mapping_table.get(&seq_id) {
+            Some(block_map) => block_map
+                .block_ids
+                .iter()
+                .filter(|&b_id| self.block_allocator.get_block(*b_id).ref_cnt == 1)
+                .count(),
+            None => 0,
+        }
     }
 
     fn get_last_block_id(&self, seq_id: u64) -> Option<u32> {
@@ -411,7 +421,7 @@ impl BlockManager {
         let total_token_len = token_ids.len();
         let num_alloc_tokens = total_token_len - num_allocated_slots;
 
-        let mut add_block_ids: Vec<u32> = Vec::new();
+        let mut new_block_ids: Vec<u32> = Vec::new();
 
         if num_allocated_slots > 0 {
             let last_block_id = self
@@ -461,16 +471,16 @@ impl BlockManager {
                     }
                 }
 
-                add_block_ids.push(block_id);
+                new_block_ids.push(block_id);
             }
         }
 
         self.seq_block_mapping_table
             .entry(seq.seq_id)
             .and_modify(|block_map| {
-                block_map.append_block_ids(&mut add_block_ids, num_alloc_tokens)
+                block_map.append_block_ids(&mut new_block_ids, num_alloc_tokens)
             })
-            .or_insert(BlockMap::new(add_block_ids, num_alloc_tokens, 0));
+            .or_insert(BlockMap::new(new_block_ids, num_alloc_tokens, 0));
 
         num_alloc_tokens
     }
@@ -481,19 +491,19 @@ impl BlockManager {
         }
 
         let mut reused_token_len = 0;
-        let mut add_block_ids: Vec<u32> = Vec::new();
+        let mut new_block_ids: Vec<u32> = Vec::new();
 
         for block_id in self.get_prefix_cache_blocks(&seq.token_ids) {
             self.block_allocator.alloc_block_by_id(block_id);
 
             reused_token_len += self.block_size;
 
-            add_block_ids.push(block_id);
+            new_block_ids.push(block_id);
         }
 
         self.seq_block_mapping_table.insert(
             seq.seq_id,
-            BlockMap::new(add_block_ids, reused_token_len, reused_token_len),
+            BlockMap::new(new_block_ids, reused_token_len, reused_token_len),
         );
 
         reused_token_len
@@ -511,7 +521,7 @@ impl BlockManager {
         let block_map = maybe_block_map.unwrap();
 
         let mut cached_token_len = block_map.filled_token_len;
-        let mut add_block_ids: Vec<u32> = Vec::new();
+        let mut new_block_ids: Vec<u32> = Vec::new();
 
         let (block_ids, _) =
             self.get_prefix_cache_blocks_range(token_ids, cached_token_len, token_ids.len());
@@ -520,7 +530,7 @@ impl BlockManager {
 
             cached_token_len += self.block_size;
 
-            add_block_ids.push(block_id);
+            new_block_ids.push(block_id);
         }
 
         let num_add_slots = cached_token_len - block_map.filled_token_len;
@@ -528,7 +538,7 @@ impl BlockManager {
         self.seq_block_mapping_table
             .entry(seq_id)
             .and_modify(|block_map| {
-                block_map.block_ids.append(&mut add_block_ids);
+                block_map.block_ids.append(&mut new_block_ids);
                 block_map.num_allocated_slots = cached_token_len;
                 block_map.filled_token_len = cached_token_len;
             });
@@ -635,11 +645,6 @@ impl BlockManager {
         }
 
         num_blocks
-    }
-
-    #[allow(dead_code)]
-    pub fn get_prefix_cache_token_len(&self, token_ids: &[u32]) -> usize {
-        self.get_prefix_cache_blocks(token_ids).len() * self.block_size
     }
 
     pub fn update_filled_len(&mut self, seq_id: u64, new_filled_token_len: usize) {
