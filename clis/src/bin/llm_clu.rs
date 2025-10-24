@@ -18,8 +18,15 @@ fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
     let obj = value.as_object().expect("expected a struct-like object");
 
     obj.iter()
-        .map(|(k, v)| {
+        .filter_map(|(k, v)| {
             let key = k.replace("_", "-");
+            if let Value::Bool(b) = v {
+                return match b {
+                    true => Some(format!("--{}", key)),
+                    false => None,
+                };
+            }
+
             let val = match v {
                 Value::String(s) => s.clone(),
                 Value::Array(vec) => {
@@ -34,7 +41,7 @@ fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
                 }
                 _ => v.to_string(),
             };
-            format!("--{}={}", key, val)
+            Some(format!("--{}={}", key, val))
         })
         .collect()
 }
@@ -85,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         host_kv_cache_size: args.host_kv_cache_size,
                         disk_kv_cache_size: args.disk_kv_cache_size,
                         disk_kv_cache_path: args.disk_kv_cache_path.clone(),
+                        enable_reorder: args.enable_reorder,
                         max_batch_size: args.max_batch_size,
                         max_seq_len: args.max_seq_len,
                         max_num_batched_tokens: args.max_num_batched_tokens,
@@ -119,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             host_kv_cache_size: llm_server.host_kv_cache_size,
             disk_kv_cache_size: llm_server.disk_kv_cache_size,
             disk_kv_cache_path: llm_server.disk_kv_cache_path.clone(),
+            enable_reorder: llm_server.enable_reorder,
             max_batch_size: llm_server.max_batch_size,
             max_seq_len: llm_server.max_seq_len,
             max_num_batched_tokens: llm_server.max_num_batched_tokens,

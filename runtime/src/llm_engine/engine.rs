@@ -51,6 +51,7 @@ impl LLMEngine {
         host_cache_size: usize,
         disk_cache_size: usize,
         disk_cache_path: String,
+        enable_reorder: bool,
         max_batch_size: usize,
         max_seq_len: usize,
         max_num_batched_tokens: usize,
@@ -138,7 +139,10 @@ impl LLMEngine {
             num_gpu_blocks as usize,
             num_host_blocks as usize,
             num_disk_blocks as usize,
+            enable_reorder,
         );
+
+        info!("{:?}", scheduler);
 
         // Publish stats to the NATS server for initial engine registration.
         let stats = scheduler.get_stats();
@@ -460,6 +464,7 @@ impl LLMEngineWrapper {
         host_kv_cache_size: usize,
         disk_kv_cache_size: usize,
         disk_kv_cache_path: String,
+        enable_reorder: bool,
         max_batch_size: usize,
         max_seq_len: usize,
         max_num_batched_tokens: usize,
@@ -475,6 +480,7 @@ impl LLMEngineWrapper {
             host_kv_cache_size,
             disk_kv_cache_size,
             disk_kv_cache_path,
+            enable_reorder,
             max_batch_size,
             max_seq_len,
             max_num_batched_tokens,

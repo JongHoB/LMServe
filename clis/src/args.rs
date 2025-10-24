@@ -33,6 +33,9 @@ pub struct CLIArgs {
     #[arg(long, default_value_t = configs::default_disk_kv_cache_path())]
     pub disk_kv_cache_path: String,
 
+    #[arg(long, default_value_t = configs::default_enable_reorder())]
+    pub enable_reorder: bool,
+
     #[arg(long, default_value_t = configs::default_max_batch_size())]
     pub max_batch_size: usize,
 
@@ -104,6 +107,9 @@ pub struct LLMSrvArgs {
 
     #[arg(long, default_value_t = configs::default_disk_kv_cache_path())]
     pub disk_kv_cache_path: String,
+
+    #[arg(long, default_value_t = configs::default_enable_reorder())]
+    pub enable_reorder: bool,
 
     #[arg(long, default_value_t = configs::default_max_batch_size())]
     pub max_batch_size: usize,

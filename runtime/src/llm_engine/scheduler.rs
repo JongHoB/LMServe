@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::pb::worker::{BlockMapping, BlockMappingEntry};
 use crate::stats::Stats;
@@ -43,6 +43,41 @@ impl DeviceBlockRegion {
     }
 }
 
+fn is_sorted_by<T, F, K>(deque: &VecDeque<T>, key_fn: F) -> bool
+where
+    F: Fn(&T) -> K,
+    K: PartialEq + PartialOrd,
+{
+    let mut iter = deque.iter();
+    let mut prev = match iter.next() {
+        Some(first) => key_fn(first),
+        None => return true,
+    };
+
+    for item in iter {
+        let current = key_fn(item);
+        if prev > current {
+            return false;
+        }
+        prev = current;
+    }
+
+    true
+}
+
+fn insert_sorted_by<T, F, K>(deque: &mut VecDeque<T>, item: T, key_fn: F)
+where
+    F: Fn(&T) -> K,
+    K: PartialEq + PartialOrd,
+{
+    let key = key_fn(&item);
+    let pos = deque.iter().position(|x| key_fn(x) > key);
+    match pos {
+        Some(i) => deque.insert(i, item),
+        None => deque.push_back(item),
+    }
+}
+
 pub struct Scheduler {
     pub max_batch_size: usize,
     pub max_seq_len: usize,
@@ -50,6 +85,7 @@ pub struct Scheduler {
     gpu_block_manager: BlockManager,
     host_block_manager: BlockManager,
     disk_block_manager: BlockManager,
+    enable_reorder: bool,
     watermark_blocks: f32,
     waiting: VecDeque<InferTask>,
     allocated: VecDeque<InferTask>,
@@ -61,6 +97,17 @@ pub struct Scheduler {
     last_log_time: u64,
 }
 
+impl std::fmt::Debug for Scheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scheduler")
+            .field("max_batch_size", &self.max_batch_size)
+            .field("max_seq_len", &self.max_seq_len)
+            .field("max_num_batched_tokens", &self.max_num_batched_tokens)
+            .field("enable_reorder", &self.enable_reorder)
+            .finish()
+    }
+}
+
 impl Scheduler {
     pub fn new(
         max_batch_size: usize,
@@ -70,6 +117,7 @@ impl Scheduler {
         num_gpu_blocks: usize,
         num_host_blocks: usize,
         num_disk_blocks: usize,
+        enable_reorder: bool,
     ) -> Scheduler {
         Scheduler {
             max_batch_size,
@@ -78,6 +126,7 @@ impl Scheduler {
             gpu_block_manager: BlockManager::new(block_size, num_gpu_blocks),
             host_block_manager: BlockManager::new(block_size, num_host_blocks),
             disk_block_manager: BlockManager::new(block_size, num_disk_blocks),
+            enable_reorder,
             watermark_blocks: 0.97,
             waiting: VecDeque::new(),
             allocated: VecDeque::new(),
@@ -128,7 +177,9 @@ impl Scheduler {
         // NOTE(jinu):
         // If no pending requests and the number of reusable KVs on disk is below threshold,
         // recompute instead of waiting for KV restoration.
-        if self.waiting.is_empty() && (disk_filled - host_filled) < DISK_RECOMPUTE_THRESHOLD {
+        if self.waiting.is_empty()
+            || disk_filled.saturating_sub(host_filled) < DISK_RECOMPUTE_THRESHOLD
+        {
             return None;
         }
 
@@ -170,7 +221,44 @@ impl Scheduler {
         let head_seq = infer_task.get_head_seq().expect("No active sequence found");
         self.host_block_manager.update_prefix_cache_blocks(head_seq);
 
-        self.add(infer_task);
+        insert_sorted_by(&mut self.waiting, infer_task, |t| t.get_arrival_time());
+    }
+
+    fn can_alloc_infer_task(
+        &self,
+        infer_task: &InferTask,
+        num_extra_blocks: usize,
+        watermark: f32,
+        device: Device,
+    ) -> bool {
+        let mut num_alloc_seqs = 0;
+        let block_manager = self.get_block_manager(&device);
+        for seq in infer_task.get_active_seqs() {
+            let num_required_blocks = block_manager.get_num_required_blocks(seq);
+            if block_manager.can_alloc_blocks(
+                num_required_blocks.saturating_sub(num_extra_blocks),
+                watermark,
+            ) {
+                num_alloc_seqs += 1;
+            } else {
+                break;
+            }
+        }
+
+        num_alloc_seqs > 0
+    }
+
+    fn get_reclaimable_blocks(&self, infer_task: &InferTask, device: Device) -> usize {
+        let mut num_reclaimable_blocks = 0;
+        let block_manager = self.get_block_manager(&device);
+        for seq in infer_task.get_active_seqs() {
+            let num_shared_blocks = block_manager.get_num_sharable_blocks(&seq.token_ids);
+            let num_allocated_blocks = block_manager.get_num_allocated_blocks(seq.seq_id);
+            let num_unique_blocks = num_allocated_blocks - num_shared_blocks;
+
+            num_reclaimable_blocks += num_unique_blocks;
+        }
+        num_reclaimable_blocks
     }
 
     fn try_alloc_infer_task(
@@ -182,8 +270,7 @@ impl Scheduler {
         let mut num_alloc_seqs = 0;
         let block_manager = self.get_block_manager_mut(&device);
         for seq in infer_task.get_active_seqs_mut() {
-            let num_cache_blocks = block_manager.get_num_prefix_cache_blocks(&seq.token_ids);
-            let num_required_blocks = block_manager.get_num_required_blocks(seq) - num_cache_blocks;
+            let num_required_blocks = block_manager.get_num_required_blocks(seq);
             if block_manager.can_alloc_blocks(num_required_blocks, watermark) {
                 block_manager.init_prefix_cache_blocks(seq);
 
@@ -466,6 +553,7 @@ impl Scheduler {
     pub fn schedule(&mut self) -> (Vec<InferInput>, Vec<BlockMapping>, Vec<BlockMapping>, Stats) {
         let mut allocated: VecDeque<InferTask> = VecDeque::new();
 
+        // Allocate decode tasks
         while let Some(infer_task) = self.allocated.pop_front() {
             if self.try_extend_infer_task(&infer_task, 1.0, Device::Gpu) {
                 self.try_extend_infer_task(&infer_task, 1.0, Device::Host);
@@ -473,28 +561,33 @@ impl Scheduler {
                 allocated.push_back(infer_task);
             } else if let Some(mut preempt_task) = self.allocated.pop_back() {
                 self.preempt_infer_task(&mut preempt_task);
-                self.waiting.push_front(preempt_task);
+                insert_sorted_by(&mut self.waiting, preempt_task, |t| t.get_arrival_time());
 
                 self.allocated.push_front(infer_task);
                 continue;
             } else {
-                self.waiting.push_front(infer_task);
-                break;
-            }
-        }
-
-        while let Some(mut infer_task) = self.waiting.pop_front() {
-            if self.try_alloc_infer_task(&mut infer_task, self.watermark_blocks, Device::Gpu) {
-                self.try_extend_infer_task(&infer_task, 1.0, Device::Host);
-
-                allocated.push_back(infer_task);
-            } else {
-                self.waiting.push_front(infer_task);
+                insert_sorted_by(&mut self.waiting, infer_task, |t| t.get_arrival_time());
                 break;
             }
         }
 
         self.allocated = allocated;
+
+        // Allocate prefill tasks
+        if self.enable_reorder {
+            self.schedule_waiting_with_reorder();
+        } else {
+            while let Some(mut infer_task) = self.waiting.pop_front() {
+                if self.try_alloc_infer_task(&mut infer_task, self.watermark_blocks, Device::Gpu) {
+                    self.try_extend_infer_task(&infer_task, 1.0, Device::Host);
+
+                    self.allocated.push_back(infer_task);
+                } else {
+                    self.waiting.push_front(infer_task);
+                    break;
+                }
+            }
+        }
 
         let (running_batch, infer_inputs, fetch_block_mappings, write_through_block_mappings) =
             self.dispatch();
@@ -568,6 +661,94 @@ impl Scheduler {
         finished_tasks
     }
 
+    fn schedule_waiting_with_reorder(&mut self) {
+        let total_tasks_before = self.allocated.len() + self.waiting.len();
+
+        let mut next_waiting: VecDeque<InferTask> = VecDeque::new();
+        while let Some(mut waiting_task) = self.waiting.pop_front() {
+            if self.try_alloc_infer_task(&mut waiting_task, self.watermark_blocks, Device::Gpu) {
+                self.try_extend_infer_task(&waiting_task, 1.0, Device::Host);
+
+                insert_sorted_by(&mut self.allocated, waiting_task, |t| t.get_arrival_time());
+                continue;
+            }
+
+            // Collect promoted tasks.
+            // Order of promoted_tasks: oldest --> newest
+            let mut promoted_tasks = VecDeque::new();
+            while let Some(allocated_task) = self.allocated.pop_back() {
+                if waiting_task.get_arrival_time() < allocated_task.get_arrival_time() {
+                    promoted_tasks.push_front(allocated_task);
+                } else {
+                    self.allocated.push_back(allocated_task);
+                    break;
+                }
+            }
+
+            if promoted_tasks.is_empty() {
+                next_waiting.push_back(waiting_task);
+                continue;
+            }
+
+            let num_reclaimable_blocks: usize = promoted_tasks
+                .iter()
+                .map(|task| self.get_reclaimable_blocks(task, Device::Gpu))
+                .sum();
+
+            let can_alloc = self.can_alloc_infer_task(
+                &waiting_task,
+                num_reclaimable_blocks,
+                self.watermark_blocks,
+                Device::Gpu,
+            );
+            if can_alloc {
+                // Preempt the promoted tasks and allocate a waiting task that has yeilded its turn.
+                while let Some(mut promoted_task) = promoted_tasks.pop_back() {
+                    self.preempt_infer_task(&mut promoted_task);
+
+                    insert_sorted_by(&mut self.waiting, promoted_task, |t| t.get_arrival_time());
+
+                    if self.try_alloc_infer_task(
+                        &mut waiting_task,
+                        self.watermark_blocks,
+                        Device::Gpu,
+                    ) {
+                        self.try_extend_infer_task(&waiting_task, 1.0, Device::Host);
+
+                        self.allocated.push_back(waiting_task);
+
+                        for remaining in promoted_tasks.drain(..) {
+                            self.allocated.push_back(remaining);
+                        }
+
+                        break;
+                    }
+                }
+            } else {
+                for promoted_task in promoted_tasks.drain(..) {
+                    self.allocated.push_back(promoted_task);
+                }
+                next_waiting.push_back(waiting_task);
+            }
+        }
+
+        self.waiting = next_waiting;
+
+        let total_tasks_after = self.allocated.len() + self.waiting.len();
+
+        debug_assert_eq!(
+            total_tasks_before, total_tasks_after,
+            "tasks count mismatch after request reordering"
+        );
+
+        if !is_sorted_by(&self.allocated, |t| t.get_arrival_time()) {
+            warn!("Tasks in 'allocated' are not sorted by arrival time.")
+        }
+        if !is_sorted_by(&self.waiting, |t| t.get_arrival_time()) {
+            warn!("Tasks in 'waiting' are not sorted by arrival time.")
+        }
+    }
+
     pub fn remove_task(&mut self, infer_task: &InferTask) {
         for seq in infer_task.get_seqs(SeqStatus::Finished) {
             if seq.disable_cache {
@@ -597,7 +778,7 @@ impl Scheduler {
         let num_promoted_reqs: usize = {
             let head_arrival_time = self
                 .waiting
-                .get(0)
+                .front()
                 .map_or(u64::MAX, |t| t.get_arrival_time());
 
             self.allocated

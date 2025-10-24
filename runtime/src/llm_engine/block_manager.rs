@@ -279,10 +279,26 @@ impl BlockManager {
     }
 
     pub fn get_num_required_blocks(&self, seq: &Sequence) -> usize {
-        let num_allocated_slots = self.get_num_allocated_slots(seq.seq_id);
+        let num_allocated_blocks = self.get_num_allocated_blocks(seq.seq_id);
+        let num_sharable_blocks = self.get_num_sharable_blocks(&seq.token_ids);
+
         let total_token_len = seq.token_ids.len();
-        let num_required_slots = total_token_len.saturating_sub(num_allocated_slots);
-        num_required_slots.div_ceil(self.block_size)
+        let num_total_blocks = total_token_len.div_ceil(self.block_size);
+
+        num_total_blocks - num_allocated_blocks.max(num_sharable_blocks)
+    }
+
+    pub fn get_num_allocated_blocks(&self, seq_id: u64) -> usize {
+        self.seq_block_mapping_table
+            .get(&seq_id)
+            .map_or(0, |block_map| block_map.block_ids.len())
+    }
+
+    pub fn get_num_sharable_blocks(&self, token_ids: &[u32]) -> usize {
+        self.get_prefix_cache_blocks(token_ids)
+            .iter()
+            .filter(|&b_id| self.block_allocator.get_block(*b_id).ref_cnt > 0)
+            .count()
     }
 
     fn get_last_block_id(&self, seq_id: u64) -> Option<u32> {
@@ -619,10 +635,6 @@ impl BlockManager {
         }
 
         num_blocks
-    }
-
-    pub fn get_num_prefix_cache_blocks(&self, token_ids: &[u32]) -> usize {
-        self.get_prefix_cache_blocks(token_ids).len()
     }
 
     #[allow(dead_code)]

@@ -101,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.host_kv_cache_size,
             args.disk_kv_cache_size,
             disk_kv_cache_path,
+            args.enable_reorder,
             args.max_batch_size,
             args.max_seq_len,
             args.max_num_batched_tokens,

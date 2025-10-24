@@ -19,6 +19,7 @@ default_fn!(default_gpu_memory_fraction, f32, 0.9);
 default_fn!(default_host_kv_cache_size, usize, 16);
 default_fn!(default_disk_kv_cache_size, usize, 0);
 default_fn!(default_disk_kv_cache_path, String, String::from("/tmp"));
+default_fn!(default_enable_reorder, bool, false);
 default_fn!(default_max_batch_size, usize, 256);
 default_fn!(default_max_seq_len, usize, 16384);
 default_fn!(default_max_num_batched_tokens, usize, 2048);
@@ -74,6 +75,9 @@ pub struct LLMSrvConfig {
 
     #[serde(default = "default_disk_kv_cache_path")]
     pub disk_kv_cache_path: String,
+
+    #[serde(default = "default_enable_reorder")]
+    pub enable_reorder: bool,
 
     #[serde(default = "default_max_batch_size")]
     pub max_batch_size: usize,
