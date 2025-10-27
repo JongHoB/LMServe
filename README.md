@@ -1,6 +1,6 @@
-# LLMServe
+# LMServe
 
-**LLMServe** is a lightweight and fast LLM serving framework for academic purposes. It includes the following features.
+**LMServe** is a lightweight and fast LLM serving framework for academic purposes. It includes the following features.
 
 * **KV block management with PagedAttention** for memory efficiency
 * **Prefix KV sharing** to cut redundant compute and memory pressure across multiple requests 
@@ -9,7 +9,7 @@
 * **Chunked prefill** to reduce decode delays from long prefills
 * **Disaggregated inference** to isolate prefill and decode phases
 
-Note that LLMServe includes key ideas proposed in our ASPLOS 2025 paper, `Accelerating LLM Serving for Multi-turn Dialogues with Efficient Resource Management` [[Paper](https://dl.acm.org/doi/pdf/10.1145/3676641.3716245)]. 
+Note that LMServe includes key ideas proposed in our ASPLOS 2025 paper, `Accelerating LLM Serving for Multi-turn Dialogues with Efficient Resource Management` [[Paper](https://dl.acm.org/doi/pdf/10.1145/3676641.3716245)].
 
 
 ## Requirements
@@ -33,15 +33,15 @@ Before running the server, you must set the `LMSERVE_HOME` environment variable 
 $ export LMSERVE_HOME=/path/to/LMServe
 ```
 
-Additionally, LLMServe has a monitoring daemon configured with a pub/sub architecture to track the status of each node (e.g., number of running or pending requests, etc.).
-Before launching LLMServe, we must prepare the `nats-server`. You can simply run it using Docker:
+Additionally, LMServe has a monitoring daemon configured with a pub/sub architecture to track the status of each node (e.g., number of running or pending requests, etc.).
+Before launching LMServe, we must prepare the `nats-server`. You can simply run it using Docker:
 
 ```bash
 $ docker network create nats
 $ docker run -d --name nats --network nats --rm -p 4222:4222 -p 8222:8222 nats --http_port 8222
 ```
 
-### Launching LLMServe
+### Launching LMServe
 Then, launch the server with:
 ```bash
 $ bin/launcher --config configs/default.yaml
