@@ -91,7 +91,8 @@ class KVWorker:
         self,
         name: str,
         params: KVWorkerParams,
-        num_workers: int = 4,
+        num_disk_copy_workers: int = 4,
+        num_nixl_transfer_workers: int = 4,
     ):
         num_layers = params.num_layers
         num_gpu_blocks = params.num_gpu_blocks
@@ -164,7 +165,9 @@ class KVWorker:
         kv_agent = nixl_agent(name, nixl_config)
 
         # Create the actual UCX backend with the specified number of workers.
-        kv_agent.create_backend("UCX", {"num_workers": str(num_workers)})
+        kv_agent.create_backend("UCX", {
+            "num_workers": str(num_nixl_transfer_workers),
+        })
 
         reg_desc = kv_agent.register_memory(
             self.host_kv_caches_tensor,
@@ -178,8 +181,11 @@ class KVWorker:
         self.kv_agent_metadata = kv_agent.get_agent_metadata()
         self.kv_agent = kv_agent
 
-        self.nixl_thread_pool = ThreadPoolExecutor(max_workers=num_workers)
-        self.disk_thread_pool = ThreadPoolExecutor(max_workers=num_workers)
+        self.nixl_thread_pool = ThreadPoolExecutor(
+            max_workers=num_nixl_transfer_workers)
+
+        self.disk_thread_pool = ThreadPoolExecutor(
+            max_workers=num_disk_copy_workers)
 
         self.COPY_KV_OP_MAP = {
             (Device.GPU, Device.Host): self._copy_kv_gpu_to_host,
