@@ -5,13 +5,9 @@ from typing import Tuple
 from llm_worker.ops.triton.rotary_embedding import apply_rotary_pos_emb_kernel
 
 
-def rotary_pos_emb(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    positions: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    head_dim: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def rotary_pos_emb(query: torch.Tensor, key: torch.Tensor,
+                   positions: torch.Tensor, cos_sin_cache: torch.Tensor,
+                   head_dim: int) -> Tuple[torch.Tensor, torch.Tensor]:
     num_tokens = positions.shape[0]
     num_heads = query.shape[1] // head_dim
     num_kv_heads = key.shape[1] // head_dim
@@ -33,7 +29,7 @@ def rotary_pos_emb(
         num_kv_heads,
         head_dim,
         rotary_dim,
-        BLOCK_SIZE=rotary_dim//2,
+        BLOCK_SIZE=rotary_dim // 2,
     )
 
     return q_out, k_out

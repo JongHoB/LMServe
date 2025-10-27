@@ -49,6 +49,7 @@ class PCIBus:
 
 
 def set_cpu_affinity_for_gpu(gpu_idx: int):
+
     def get_gpu_pci_bus(gpu_idx: int) -> PCIBus:
         try:
             cmd = [

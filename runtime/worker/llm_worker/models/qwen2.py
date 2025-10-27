@@ -19,6 +19,7 @@ from llm_worker.models.layers import RotaryEmbedding
 
 
 class Qwen2RMSNorm(nn.Module):
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
@@ -33,6 +34,7 @@ class Qwen2RMSNorm(nn.Module):
 
 
 class Qwen2MLP(nn.Module):
+
     def __init__(
         self,
         config,
@@ -66,6 +68,7 @@ class Qwen2MLP(nn.Module):
 
 
 class Qwen2Attention(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         hidden_size = config.hidden_size
@@ -148,6 +151,7 @@ class Qwen2Attention(nn.Module):
 
 
 class Qwen2DecoderLayer(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -188,6 +192,7 @@ class Qwen2DecoderLayer(nn.Module):
 
 
 class Qwen2Model(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -219,6 +224,7 @@ class Qwen2Model(nn.Module):
 
 
 class Qwen2ForCausalLM(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.config = config

@@ -19,7 +19,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # Parts of the code here are adapted from PyTorch
 # repo: https://github.com/pytorch/pytorch
 
@@ -36,7 +35,8 @@ from .initialize import get_data_parallel_rank, get_model_parallel_rank
 _MODEL_PARALLEL_RNG_TRACKER_NAME = "model-parallel-rng"
 
 
-def _set_cuda_rng_state(new_state: torch.ByteTensor, device: Union[int, str, torch.device] = -1) -> None:
+def _set_cuda_rng_state(new_state: torch.ByteTensor,
+                        device: Union[int, str, torch.device] = -1) -> None:
     """Sets the random number generator state of the current GPU.
 
     Arguments:
@@ -117,7 +117,8 @@ class CudaRNGStatesTracker:
         _set_cuda_rng_state(orig_rng_state)
 
     @contextlib.contextmanager
-    def fork(self, name: str = _MODEL_PARALLEL_RNG_TRACKER_NAME) -> Iterator[None]:
+    def fork(self,
+             name: str = _MODEL_PARALLEL_RNG_TRACKER_NAME) -> Iterator[None]:
         """Fork the cuda rng state, perform operations, and exit with
         the original state."""
         # Check if we have added the state
@@ -187,7 +188,8 @@ def model_parallel_cuda_manual_seed(seed: int) -> None:
         # Set the default state.
         torch.cuda.manual_seed(data_parallel_seed)
         # and model parallel state.
-        _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME, model_parallel_seed)
+        _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME,
+                                    model_parallel_seed)
 
 
 class CheckpointFunction(torch.autograd.Function):
@@ -215,7 +217,9 @@ class CheckpointFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *args):  # type: ignore
         if not torch.autograd._is_checkpoint_valid():
-            raise RuntimeError("Checkpointing is not compatible with .grad(), please use .backward() if possible")
+            raise RuntimeError(
+                "Checkpointing is not compatible with .grad(), please use .backward() if possible"
+            )
         inputs = ctx.saved_tensors
 
         # Store the current states.
@@ -239,9 +243,9 @@ class CheckpointFunction(torch.autograd.Function):
         get_cuda_rng_tracker().set_states(bwd_cuda_rng_state_tracker)
 
         if isinstance(outputs, torch.Tensor):
-            outputs = (outputs,)
+            outputs = (outputs, )
         torch.autograd.backward(outputs, args)
-        return (None,) + tuple(inp.grad for inp in detached_inputs)
+        return (None, ) + tuple(inp.grad for inp in detached_inputs)
 
 
 def checkpoint(function, *args):  # type: ignore

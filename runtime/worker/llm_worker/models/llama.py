@@ -38,6 +38,7 @@ from llm_worker.models.layers import RotaryEmbedding
 
 
 class LlamaRMSNorm(nn.Module):
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
@@ -52,6 +53,7 @@ class LlamaRMSNorm(nn.Module):
 
 
 class LlamaMLP(nn.Module):
+
     def __init__(
         self,
         config,
@@ -86,6 +88,7 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaAttention(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         hidden_size = config.hidden_size
@@ -169,6 +172,7 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -209,6 +213,7 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class LlamaModel(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -240,6 +245,7 @@ class LlamaModel(nn.Module):
 
 
 class LlamaForCausalLM(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.config = config

@@ -7,7 +7,8 @@ MAKEFLAGS += --no-print-directory
 TARGET_DIR := target/debug
 MODE := debug
 
-.PHONY: all release build clean link-bins build-% build-worker install-worker
+.PHONY: all release build clean link-bins build-% build-worker install-worker \
+        fmt fmt-check
 
 all: develop
 
@@ -39,6 +40,14 @@ link-bins:
 		echo "Linking $(TARGET_DIR)/$$bin -> $(BIN_DIR)/$$bin"; \
 		ln -sf $(CURDIR)/$(TARGET_DIR)/$$bin $(BIN_DIR)/$$bin; \
 	done
+
+fmt:
+	@cargo fmt
+	@yapf -i -r runtime/worker/llm_worker/ --exclude runtime/worker/llm_worker/pb
+
+fmt-check:
+	@cargo fmt --all -- --check
+	@yapf -d -r runtime/worker/llm_worker/ --exclude runtime/worker/llm_worker/pb
 
 clean:
 	cargo clean

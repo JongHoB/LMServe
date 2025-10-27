@@ -19,7 +19,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from typing import List, Optional
 
 import torch
@@ -92,18 +91,26 @@ def initialize_model_parallel(
     model_parallel_size = int(min(model_parallel_size_, world_size))
     ensure_divisibility(world_size, model_parallel_size)
     ensure_divisibility(world_size, context_parallel_size)
-    ensure_divisibility(world_size, model_parallel_size * pipeline_length * context_parallel_size)
+    ensure_divisibility(
+        world_size,
+        model_parallel_size * pipeline_length * context_parallel_size)
     rank = torch.distributed.get_rank()
 
-    data_parallel_size = int(world_size / (model_parallel_size * pipeline_length * context_parallel_size))
+    data_parallel_size = int(
+        world_size /
+        (model_parallel_size * pipeline_length * context_parallel_size))
 
     if torch.distributed.get_rank() == 0:
-        print("> initializing model parallel with size {}".format(model_parallel_size))
-        print("> initializing context parallel with size {}".format(context_parallel_size))
+        print("> initializing model parallel with size {}".format(
+            model_parallel_size))
+        print("> initializing context parallel with size {}".format(
+            context_parallel_size))
         print("> initializing pipeline with size {}".format(pipeline_length))
         print("> initializing ddp with size {}".format(data_parallel_size))
 
-    groups = torch.LongTensor(range(world_size)).reshape(data_parallel_size, pipeline_length, context_parallel_size, model_parallel_size)
+    groups = torch.LongTensor(range(world_size)).reshape(
+        data_parallel_size, pipeline_length, context_parallel_size,
+        model_parallel_size)
 
     found = torch.where(groups == rank)
     assert all(len(x) == 1 for x in found)
@@ -117,11 +124,12 @@ def initialize_model_parallel(
         for j in range(context_parallel_size):
             for k in range(model_parallel_size):
                 ranks = groups[:, i, j, k].tolist()
-                group = torch.distributed.new_group(ranks, backend=ddp_backend, timeout=timeout)
+                group = torch.distributed.new_group(ranks,
+                                                    backend=ddp_backend,
+                                                    timeout=timeout)
                 if i == found[1] and j == found[2] and k == found[3]:
                     _DATA_PARALLEL_GROUP = group
                     _DATA_PARALLEL_GROUP_RANKS = ranks
-
 
     # Build the model parallel groups.
     global _MODEL_PARALLEL_GROUP
@@ -129,10 +137,12 @@ def initialize_model_parallel(
     for i in range(data_parallel_size):
         for j in range(pipeline_length):
             for k in range(context_parallel_size):
-                group = torch.distributed.new_group(groups[i, j, k, :].tolist(), backend=model_parallel_backend, timeout=timeout)
+                group = torch.distributed.new_group(
+                    groups[i, j, k, :].tolist(),
+                    backend=model_parallel_backend,
+                    timeout=timeout)
                 if i == found[0] and j == found[1] and k == found[2]:
                     _MODEL_PARALLEL_GROUP = group
-
 
     # Build the pipeline parallel groups.
     global _PIPELINE_PARALLEL_GROUP
@@ -142,24 +152,26 @@ def initialize_model_parallel(
         for j in range(context_parallel_size):
             for k in range(model_parallel_size):
                 ranks = groups[i, :, j, k].tolist()
-                group = torch.distributed.new_group(ranks, backend=pipeline_backend, timeout=timeout)
+                group = torch.distributed.new_group(ranks,
+                                                    backend=pipeline_backend,
+                                                    timeout=timeout)
                 if i == found[0] and j == found[2] and k == found[3]:
                     _PIPELINE_PARALLEL_GROUP = group
                     _PIPELINE_PARALLEL_RANKS = ranks
-
 
     # Build the context parallel groups.
     global _CONTEXT_PARALLEL_GROUP
     global _CONTEXT_PARALLEL_GROUP_RANKS
 
-    assert (
-        _CONTEXT_PARALLEL_GROUP is None
-    ), "Context parallelism is already initialized."
+    assert (_CONTEXT_PARALLEL_GROUP
+            is None), "Context parallelism is already initialized."
     for i in range(data_parallel_size):
         for j in range(pipeline_length):
             for k in range(model_parallel_size):
                 ranks = groups[i, j, :, k].tolist()
-                group = torch.distributed.new_group(ranks, backend=cp_backend, timeout=timeout)
+                group = torch.distributed.new_group(ranks,
+                                                    backend=cp_backend,
+                                                    timeout=timeout)
                 if i == found[0] and j == found[1] and k == found[3]:
                     _CONTEXT_PARALLEL_GROUP = group
                     _CONTEXT_PARALLEL_GROUP_RANKS = ranks
@@ -174,9 +186,8 @@ def model_parallel_is_initialized() -> bool:
 
 def get_context_parallel_group() -> torch.distributed.ProcessGroup:
     """Get the context parallel group the caller rank belongs to."""
-    assert (
-        _CONTEXT_PARALLEL_GROUP is not None
-    ), "context parallel group is not initialized"
+    assert (_CONTEXT_PARALLEL_GROUP
+            is not None), "context parallel group is not initialized"
     return _CONTEXT_PARALLEL_GROUP
 
 

@@ -69,7 +69,6 @@ impl Llm for LLMService {
         &self,
         request: Request<GenerateRequest>,
     ) -> Result<Response<GenerateResponse>, Status> {
-
         let output = self
             .engine
             .generate(request.into_inner())

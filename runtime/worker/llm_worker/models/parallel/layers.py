@@ -19,10 +19,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # Parts of the code here are adapted from PyTorch
 # repo: https://github.com/pytorch/pytorch
-
 
 from typing import Callable, Optional
 
@@ -65,12 +63,18 @@ def _initialize_affine_weight(
         return None
 
     # Initialize master weight
-    master_weight = torch.empty(out_features, in_features, dtype=weight.dtype, requires_grad=False)
+    master_weight = torch.empty(out_features,
+                                in_features,
+                                dtype=weight.dtype,
+                                requires_grad=False)
     init_method(master_weight)
 
     # Split and copy
-    per_partition_per_stride_size = divide_and_check_no_remainder(per_partition_size, stride)
-    weight_list = torch.split(master_weight, per_partition_per_stride_size, dim=partition_dim)
+    per_partition_per_stride_size = divide_and_check_no_remainder(
+        per_partition_size, stride)
+    weight_list = torch.split(master_weight,
+                              per_partition_per_stride_size,
+                              dim=partition_dim)
     rank = get_model_parallel_rank()
     my_weight_list = weight_list[rank::world_size]
 
@@ -101,7 +105,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         norm_type: float = 2.0,
         scale_grad_by_freq: bool = False,
         sparse: bool = False,
-        init_method: Callable[[torch.Tensor], torch.Tensor] = init.xavier_normal_,
+        init_method: Callable[[torch.Tensor],
+                              torch.Tensor] = init.xavier_normal_,
     ) -> None:
         super(VocabParallelEmbedding, self).__init__()
         # Keep the input dimensions.
@@ -115,20 +120,23 @@ class VocabParallelEmbedding(torch.nn.Module):
         self._weight = None
         # Divide the weight matrix along the vocaburaly dimension.
         self.vocab_start_index, self.vocab_end_index = VocabUtility.vocab_range_from_global_vocab_size(
-            self.num_embeddings, get_model_parallel_rank(), get_model_parallel_world_size()
-        )
+            self.num_embeddings, get_model_parallel_rank(),
+            get_model_parallel_world_size())
         self.num_embeddings_per_partition = self.vocab_end_index - self.vocab_start_index
 
         # Allocate weights.
-        self.weight = Parameter(torch.empty(self.num_embeddings_per_partition, self.embedding_dim))
+        self.weight = Parameter(
+            torch.empty(self.num_embeddings_per_partition, self.embedding_dim))
         # And initialize.
-        _initialize_affine_weight(
-            self.weight, self.num_embeddings, self.embedding_dim, self.num_embeddings_per_partition, 0, init_method
-        )
+        _initialize_affine_weight(self.weight, self.num_embeddings,
+                                  self.embedding_dim,
+                                  self.num_embeddings_per_partition, 0,
+                                  init_method)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type: ignore
         # Build the mask.
-        input_mask = (input_ < self.vocab_start_index) | (input_ >= self.vocab_end_index)
+        input_mask = (input_ < self.vocab_start_index) | (
+            input_ >= self.vocab_end_index)
         # Mask the input.
         masked_input = input_.clone() - self.vocab_start_index
         masked_input[input_mask] = 0
@@ -169,7 +177,8 @@ class ParallelEmbedding(torch.nn.Module):
         norm_type: float = 2.0,
         scale_grad_by_freq: bool = False,
         sparse: bool = False,
-        init_method: Callable[[torch.Tensor], torch.Tensor] = init.xavier_normal_,
+        init_method: Callable[[torch.Tensor],
+                              torch.Tensor] = init.xavier_normal_,
         keep_master_weight_for_test: bool = False,
     ) -> None:
         super(ParallelEmbedding, self).__init__()
@@ -184,10 +193,12 @@ class ParallelEmbedding(torch.nn.Module):
         self._weight = None
         # Divide the weight matrix along the embedding dimension.
         world_size = get_model_parallel_world_size()
-        self.embedding_dim_per_partition = divide_and_check_no_remainder(self.embedding_dim, world_size)
+        self.embedding_dim_per_partition = divide_and_check_no_remainder(
+            self.embedding_dim, world_size)
 
         # Allocate weights.
-        self.weight = Parameter(torch.empty(self.num_embeddings, self.embedding_dim_per_partition))
+        self.weight = Parameter(
+            torch.empty(self.num_embeddings, self.embedding_dim_per_partition))
         # And initialize.
         _initialize_affine_weight(
             self.weight,
@@ -242,7 +253,8 @@ class ColumnParallelLinear(torch.nn.Module):
         out_features: int,
         bias: bool = True,
         gather_output: bool = True,
-        init_method: Callable[[torch.Tensor], torch.Tensor] = init.xavier_normal_,
+        init_method: Callable[[torch.Tensor],
+                              torch.Tensor] = init.xavier_normal_,
         stride: int = 1,
         keep_master_weight_for_test: bool = False,
     ) -> None:
@@ -254,12 +266,14 @@ class ColumnParallelLinear(torch.nn.Module):
         self.gather_output = gather_output
         # Divide the weight matrix along the last dimension.
         world_size = get_model_parallel_world_size()
-        self.output_size_per_partition = divide_and_check_no_remainder(out_features, world_size)
+        self.output_size_per_partition = divide_and_check_no_remainder(
+            out_features, world_size)
 
         # Parameters.
         # Note: torch.nn.functional.linear performs XA^T + b and as a result
         # we allocate the transpose.
-        self.weight = Parameter(torch.empty(self.output_size_per_partition, self.in_features))
+        self.weight = Parameter(
+            torch.empty(self.output_size_per_partition, self.in_features))
         if bias:
             self.bias = Parameter(torch.empty(self.output_size_per_partition))
             # Always initialize bias to zero.
@@ -281,7 +295,8 @@ class ColumnParallelLinear(torch.nn.Module):
         )
 
     def get_master_weight(self) -> torch.Tensor:
-        return gather_from_model_parallel_region(self.weight.data.transpose(0, 1)).transpose_(0, 1)
+        return gather_from_model_parallel_region(
+            self.weight.data.transpose(0, 1)).transpose_(0, 1)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type: ignore
         # Set up backprop all-reduce.
@@ -329,7 +344,8 @@ class RowParallelLinear(torch.nn.Module):
         out_features: int,
         bias: bool = True,
         input_is_parallel: bool = False,
-        init_method: Callable[[torch.Tensor], torch.Tensor] = init.xavier_normal_,
+        init_method: Callable[[torch.Tensor],
+                              torch.Tensor] = init.xavier_normal_,
         stride: int = 1,
         keep_master_weight_for_test: bool = False,
     ):
@@ -341,12 +357,14 @@ class RowParallelLinear(torch.nn.Module):
         self.input_is_parallel = input_is_parallel
         # Divide the weight matrix along the last dimension.
         world_size = get_model_parallel_world_size()
-        self.input_size_per_partition = divide_and_check_no_remainder(in_features, world_size)
+        self.input_size_per_partition = divide_and_check_no_remainder(
+            in_features, world_size)
 
         # Parameters.
         # Note: torch.nn.functional.linear performs XA^T + b and as a result
         # we allocate the transpose.
-        self.weight = Parameter(torch.empty(self.out_features, self.input_size_per_partition))
+        self.weight = Parameter(
+            torch.empty(self.out_features, self.input_size_per_partition))
         if bias:
             self.bias = Parameter(torch.empty(self.out_features))
             # Always initialize bias to zero.

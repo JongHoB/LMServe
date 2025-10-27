@@ -253,7 +253,9 @@ class ModelWorker:
         # Register hook to synchronize with KVWorker
         attn_layers = travel_layers(self.model, includes=["Attention"])
         for i, layer in enumerate(attn_layers):
+
             def make_hook(i):
+
                 def pre_hook_fn(mod, input):
                     if self.enable_wait_before_execute:
                         self.kv_worker_handle.model_queue.get()
@@ -266,6 +268,7 @@ class ModelWorker:
                             self.cuda_stream)
                         # Put a dummy value to trigger KV transfer
                         self.kv_worker_handle.kv_queue.put(b'')
+
                 return pre_hook_fn, post_hook_fn
 
             pre_hook, post_hook = make_hook(i)
@@ -305,7 +308,9 @@ class ModelWorker:
         return kv_worker_params
 
     def _make_inputs(
-            self, inputs: List[InferInput], use_cache=True,
+        self,
+        inputs: List[InferInput],
+        use_cache=True,
     ) -> Tuple[torch.Tensor, InputParams]:
 
         flatten_input_ids = []
@@ -320,8 +325,7 @@ class ModelWorker:
 
         # NOTE(jinu):
         # Sort the list according to phase type to compact the inputs.
-        inputs.sort(
-            key=lambda x: -x.input_len)
+        inputs.sort(key=lambda x: -x.input_len)
 
         for data in inputs:
             input_ids = data.input_ids
@@ -560,6 +564,7 @@ class ModelWorker:
         return outputs
 
     def get_model_size(self) -> int:
+
         def get_total_size(mod):
             mod_size = 0
             if len(list(mod.children())) == 0:

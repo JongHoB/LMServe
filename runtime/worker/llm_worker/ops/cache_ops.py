@@ -23,7 +23,10 @@ def copy_blocks(
     numel_per_block = kv_caches[0][0].numel()
 
     num_copy_blocks = len(block_maps) // 2
-    grid = (num_layers, num_copy_blocks, )
+    grid = (
+        num_layers,
+        num_copy_blocks,
+    )
     cache_kernels.copy_blocks_kernel[grid](
         kv_caches,
         block_maps_ptr=block_maps_tensor,

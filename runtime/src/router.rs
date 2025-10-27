@@ -10,6 +10,7 @@ use tokio::time::sleep;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
+use crate::configs::ControllerConfig;
 use crate::monitor::StatsMonitor;
 use crate::pb::llm::llm_client::LlmClient;
 use crate::pb::llm::{
@@ -18,7 +19,6 @@ use crate::pb::llm::{
 };
 use crate::stats::Stats;
 use crate::types::{EngineKind, RoutePolicy};
-use crate::configs::ControllerConfig;
 
 struct Node {
     id: String,

@@ -4,11 +4,11 @@ use tracing::{info, warn};
 
 use crate::stats::Stats;
 
-use super::{Device, BlockMapping, BlockMappingEntry};
 use super::block_manager::{BlockManager, BlockRegion};
 use super::infer_task::{InferInput, InferOutput, InferTask};
 use super::sequence::SeqStatus;
 use super::sequence::Sequence;
+use super::{BlockMapping, BlockMappingEntry, Device};
 
 const DISK_RECOMPUTE_THRESHOLD: usize = 2048;
 

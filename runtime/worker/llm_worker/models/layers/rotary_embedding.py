@@ -8,6 +8,7 @@ from llm_worker.ops.rotary_embedding_ops import rotary_pos_emb
 
 
 class RotaryEmbedding(nn.Module):
+
     def __init__(
         self,
         config,
@@ -74,11 +75,6 @@ class RotaryEmbedding(nn.Module):
             key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
             positions: torch.Tensor,  # [num_tokens]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        query, key = rotary_pos_emb(
-            query,
-            key,
-            positions,
-            self.cos_sin_cached,
-            self.head_dim
-        )
+        query, key = rotary_pos_emb(query, key, positions, self.cos_sin_cached,
+                                    self.head_dim)
         return query, key
