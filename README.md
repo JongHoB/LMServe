@@ -1,15 +1,16 @@
 # LLMServe
 
-**LLMServe** is a lightweight and fast LLM serving framework for academic purposes. It includes key ideas proposed in our ASPLOS 2025 paper,
-`Accelerating LLM Serving for Multi-turn Dialogues with Efficient Resource Management`. 
+**LLMServe** is a lightweight and fast LLM serving framework for academic purposes. It includes the following features.
 
-**Key features**
 * **KV block management with PagedAttention** for memory efficiency
 * **Prefix KV sharing** to cut redundant compute and memory pressure across multiple requests 
 * **Multi-level KV caching** across GPU, host DRAM, and SSD to avoid recomputation for historical KVs
 * **Request reordering** to mitigate head-of-line blocking and improve tail latency
 * **Chunked prefill** to reduce decode delays from long prefills
 * **Disaggregated inference** to isolate prefill and decode phases
+
+Note that LLMServe includes key ideas proposed in our ASPLOS 2025 paper, `Accelerating LLM Serving for Multi-turn Dialogues with Efficient Resource Management` [[Paper](https://dl.acm.org/doi/pdf/10.1145/3676641.3716245)]. 
+
 
 ## Requirements
 * CUDA
