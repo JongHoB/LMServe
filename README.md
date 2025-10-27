@@ -1,7 +1,7 @@
 # LLMServe
 
-**LLMServe** is a lightweight and fast LLM serving framework that open-sources core ideas from our ASPLOS’25 work,
-*Accelerating LLM Serving for Multi-turn Dialogues with Efficient Resource Management*.
+**LLMServe** is a lightweight and fast LLM serving framework for academic purposes. It includes key ideas proposed in our ASPLOS 2025 paper,
+`Accelerating LLM Serving for Multi-turn Dialogues with Efficient Resource Management`. 
 
 **Key features**
 * **KV block management with PagedAttention** for memory efficiency
