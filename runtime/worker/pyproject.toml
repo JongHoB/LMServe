@@ -5,6 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llm_worker"
 version = "0.1.0"
+requires-python = ">=3.10"
+
 dependencies = [
     "grpcio>=1.71.0",
     "grpcio-tools>=1.71.0",
@@ -17,6 +19,7 @@ dependencies = [
     "hf-xet>=1.1.2",
     "pycuda>=2025.1",
     "nixl>=0.3.0",
+    "yapf==0.43.0",
 ]
 
 [project.scripts]
