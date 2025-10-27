@@ -13,12 +13,12 @@ use tracing::debug;
 use crate::pb::worker::kv_worker_client::KvWorkerClient;
 use crate::pb::worker::worker_client::WorkerClient;
 use crate::pb::worker::{
-    AgentMetadata, BlockMapping, GetDescriptorsRequest, InferRequest, InitCacheRequest,
-    KvTransferRequest, PullKvRequest, PushKvRequest, SwapKvRequest, WarmupRequest,
+    AgentMetadata, BlockMapping, CopyKvRequest, GetDescriptorsRequest, InferRequest,
+    InitCacheRequest, PullKvRequest, PushKvRequest, WarmupRequest,
 };
 
-use super::Bytes;
 use super::infer_task::{InferInput, InferOutput};
+use super::{Bytes, Device};
 
 type StdError = Box<dyn std::error::Error + Send + Sync + 'static>;
 type Result<T, E = StdError> = std::result::Result<T, E>;
@@ -153,21 +153,9 @@ impl ModelWorker {
 }
 
 impl KVWorker {
-    async fn transfer_kv(&self, request: KvTransferRequest) -> Result<()> {
+    async fn copy_kv(&self, request: CopyKvRequest) -> Result<()> {
         let mut client = self.connect();
-        let _ = client.transfer_kv(request).await?;
-        Ok(())
-    }
-
-    async fn swap_in_kv(&self, request: SwapKvRequest) -> Result<()> {
-        let mut client = self.connect();
-        let _ = client.swap_in_kv(request).await?;
-        Ok(())
-    }
-
-    async fn swap_out_kv(&self, request: SwapKvRequest) -> Result<()> {
-        let mut client = self.connect();
-        let _ = client.swap_out_kv(request).await?;
+        let _ = client.copy_kv(request).await?;
         Ok(())
     }
 
@@ -443,43 +431,21 @@ impl KVWorkerGroup {
         Ok(Self { workers })
     }
 
-    pub async fn transfer_kv(
+    pub async fn copy_kv(
         &self,
-        fetch_block_mappings: Vec<BlockMapping>,
-        write_through_block_mappings: Vec<BlockMapping>,
+        block_mappings: Vec<BlockMapping>,
+        src_device: Device,
+        dst_device: Device,
     ) -> Result<()> {
-        let request = KvTransferRequest {
-            fetch_block_mappings,
-            write_through_block_mappings,
+        let request = CopyKvRequest {
+            block_mappings,
+            src_device: src_device.into(),
+            dst_device: dst_device.into(),
         };
 
         let _ = self
             .run_workers_gather(request, move |worker, request| async move {
-                worker.transfer_kv(request).await
-            })
-            .await?;
-
-        Ok(())
-    }
-
-    pub async fn swap_in_kv(&self, block_mappings: Vec<BlockMapping>) -> Result<()> {
-        let request = SwapKvRequest { block_mappings };
-
-        let _ = self
-            .run_workers_gather(request, move |worker, request| async move {
-                worker.swap_in_kv(request).await
-            })
-            .await?;
-
-        Ok(())
-    }
-
-    pub async fn swap_out_kv(&self, block_mappings: Vec<BlockMapping>) -> Result<()> {
-        let request = SwapKvRequest { block_mappings };
-
-        let _ = self
-            .run_workers_gather(request, move |worker, request| async move {
-                worker.swap_out_kv(request).await
+                worker.copy_kv(request).await
             })
             .await?;
 

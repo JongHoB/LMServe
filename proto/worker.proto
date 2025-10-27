@@ -10,10 +10,14 @@ service Worker {
   rpc InitCache(InitCacheRequest) returns (InitCacheResponse);
 }
 
+enum Device  {
+    GPU = 0;
+    Host = 1;
+    Disk = 2;
+}
+
 service KVWorker {
-  rpc TransferKV(KVTransferRequest) returns (KVTransferResponse);
-  rpc SwapOutKV(SwapKVRequest) returns (SwapKVResponse);
-  rpc SwapInKV(SwapKVRequest) returns (SwapKVResponse);
+  rpc CopyKV(CopyKVRequest) returns (CopyKVResponse);
   rpc GetLocalAgentMetadata(google.protobuf.Empty) returns (AgentMetadata);
   rpc AddRemoteAgentMetadata(AgentMetadata)
       returns (AddRemoteAgentMetadataResponse);
@@ -80,18 +84,13 @@ message BlockMapping {
   repeated BlockMappingEntry entries = 2;
 }
 
-message SwapKVRequest {
+message CopyKVRequest {
   repeated BlockMapping block_mappings = 1;
+  Device src_device = 2;
+  Device dst_device = 3;
 }
 
-message SwapKVResponse { bool success = 1; }
-
-message KVTransferRequest {
-  repeated BlockMapping fetch_block_mappings = 1;
-  repeated BlockMapping write_through_block_mappings = 2;
-}
-
-message KVTransferResponse { bool success = 1; }
+message CopyKVResponse { bool success = 1; }
 
 message AgentMetadata { string agent_name = 1; bytes data = 2; }
 

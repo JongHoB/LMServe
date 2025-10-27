@@ -2,9 +2,9 @@ use std::collections::{HashMap, VecDeque};
 
 use tracing::{info, warn};
 
-use crate::pb::worker::{BlockMapping, BlockMappingEntry};
 use crate::stats::Stats;
 
+use super::{Device, BlockMapping, BlockMappingEntry};
 use super::block_manager::{BlockManager, BlockRegion};
 use super::infer_task::{InferInput, InferOutput, InferTask};
 use super::sequence::SeqStatus;
@@ -14,13 +14,6 @@ const DISK_RECOMPUTE_THRESHOLD: usize = 2048;
 
 struct BatchEntry {
     pub chunked: bool,
-}
-
-#[derive(Eq, PartialEq, Debug, Clone)]
-pub enum Device {
-    Gpu,
-    Host,
-    Disk,
 }
 
 #[derive(Debug, Clone)]

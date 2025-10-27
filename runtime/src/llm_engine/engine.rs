@@ -11,12 +11,12 @@ use crate::configs::EngineConfig;
 use crate::pb::llm::GenerateRequest;
 use crate::stats::Stats;
 
-use super::Bytes;
 use super::infer_task::InferTask;
 use super::outputs::{EngineStats, GenerateOutput, ReserveOutput, TransferOutput};
-use super::scheduler::{Device, Scheduler};
+use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use super::worker::{KVWorkerGroup, ModelWorkerGroup};
+use super::{BlockMapping, Bytes, Device};
 
 pub struct LLMEngine {
     id: String,
@@ -204,7 +204,11 @@ impl LLMEngine {
 
                     let swap_in_task = {
                         let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
-                        async move { kv_disk_worker_group.swap_in_kv(vec![block_mapping]).await }
+                        async move {
+                            kv_disk_worker_group
+                                .copy_kv(vec![block_mapping], Device::Disk, Device::Host)
+                                .await
+                        }
                     };
 
                     let callback = {
@@ -301,6 +305,20 @@ impl LLMEngine {
         Ok(())
     }
 
+    #[inline]
+    async fn copy_if_needed(
+        &self,
+        block_mappings: Vec<BlockMapping>,
+        from: Device,
+        to: Device,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if block_mappings.is_empty() {
+            Ok(())
+        } else {
+            self.kv_worker_group.copy_kv(block_mappings, from, to).await
+        }
+    }
+
     async fn iter(&self) -> Option<Vec<InferTask>> {
         let (infer_inputs, fetch_block_mappings, write_through_block_mappings, stats) = {
             // Lock scheduler briefly to check and schedule tasks.
@@ -319,17 +337,18 @@ impl LLMEngine {
         let wait_before_execute = !fetch_block_mappings.is_empty();
         let record_after_execute = !write_through_block_mappings.is_empty();
 
-        let (infer_result, transfer_result, _) = join!(
+        let (infer_result, fetch_result, write_result, _) = join!(
             self.model_worker_group
                 .infer(infer_inputs, wait_before_execute, record_after_execute),
-            self.kv_worker_group
-                .transfer_kv(fetch_block_mappings, write_through_block_mappings),
+            self.copy_if_needed(fetch_block_mappings, Device::Host, Device::Gpu),
+            self.copy_if_needed(write_through_block_mappings, Device::Gpu, Device::Host),
             self.publish_stats(stats),
         );
 
         let infer_outputs =
             infer_result.unwrap_or_else(|e| panic!("Failed to execute worker: {e}"));
-        transfer_result.unwrap_or_else(|e| panic!("Failed to transfer KV: {e}"));
+        fetch_result.unwrap_or_else(|e| panic!("Failed to fetch KV: {e}"));
+        write_result.unwrap_or_else(|e| panic!("Failed to write KV: {e}"));
 
         let (finished_tasks, stats) = {
             let mut scheduler_guard = self.scheduler.lock().await;
@@ -346,7 +365,11 @@ impl LLMEngine {
                 if let Some((br, bm)) = plan {
                     let swap_out_task = {
                         let kv_disk_worker_group = Arc::clone(&self.kv_disk_worker_group);
-                        async move { kv_disk_worker_group.swap_out_kv(vec![bm]).await }
+                        async move {
+                            kv_disk_worker_group
+                                .copy_kv(vec![bm], Device::Host, Device::Disk)
+                                .await
+                        }
                     };
 
                     let callback = {

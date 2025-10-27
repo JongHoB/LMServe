@@ -12,7 +12,7 @@ from typing import List, Tuple, Any
 from nixl._api import nixl_agent, nixl_agent_config
 from concurrent.futures import ThreadPoolExecutor
 
-from llm_worker.pb.worker_pb2 import BlockMapping
+from llm_worker.pb.worker_pb2 import BlockMapping, Device
 
 dtype_map = {
     torch.float32: np.float32,
@@ -181,45 +181,14 @@ class KVWorker:
         self.nixl_thread_pool = ThreadPoolExecutor(max_workers=num_workers)
         self.disk_thread_pool = ThreadPoolExecutor(max_workers=num_workers)
 
-    def read(
-        self,
-        block_mappings: List[BlockMapping],
-        layer_idx: int,
-    ) -> None:
-        for block_map in block_mappings:
-            for entry in block_map.entries:
-                self.host_kv_caches[entry.dst_block_id][layer_idx] = (
-                    self.disk_kv_caches[entry.src_block_id][layer_idx])
+        self.COPY_KV_OP_MAP = {
+            (Device.GPU, Device.Host): self._copy_kv_gpu_to_host,
+            (Device.Host, Device.GPU): self._copy_kv_host_to_gpu,
+            (Device.Host, Device.Disk): self._copy_kv_host_to_disk,
+            (Device.Disk, Device.Host): self._copy_kv_disk_to_host,
+        }
 
-    def write(
-        self,
-        block_mappings: List[BlockMapping],
-        layer_idx: int,
-    ) -> None:
-        for block_map in block_mappings:
-            for entry in block_map.entries:
-                self.disk_kv_caches[entry.dst_block_id][layer_idx] = (
-                    self.host_kv_caches[entry.src_block_id][layer_idx])
-
-    async def read_kv_blocks(self, block_mappings: List[BlockMapping]):
-        loop = asyncio.get_running_loop()
-        tasks = [
-            loop.run_in_executor(self.disk_thread_pool, self.read,
-                                 block_mappings, i)
-            for i in range(self.num_layers)
-        ]
-        await asyncio.gather(*tasks)
-
-    async def write_kv_blocks(self, block_mappings: List[BlockMapping]):
-        loop = asyncio.get_running_loop()
-        tasks = [
-            loop.run_in_executor(self.disk_thread_pool, self.write,
-                                 block_mappings, i)
-            for i in range(self.num_layers)
-        ]
-        await asyncio.gather(*tasks)
-
-    def fetch(
+    def _load_layer_kv_blocks_from_host(
         self,
         block_map: BlockMapping,
         layer_idx: int,
@@ -235,7 +204,7 @@ class KVWorker:
                 stream=stream,
             )
 
-    def write_through(
+    def _save_layer_kv_blocks_to_host(
         self,
         block_map: BlockMapping,
         layer_idx: int,
@@ -251,15 +220,39 @@ class KVWorker:
                 stream=stream,
             )
 
-    async def fetch_kv_blocks(
+    def _load_layer_kv_blocks_from_disk(
         self,
-        fetch_block_mappings: List[BlockMapping],
+        block_mappings: List[BlockMapping],
+        layer_idx: int,
+    ) -> None:
+        for block_map in block_mappings:
+            for entry in block_map.entries:
+                self.host_kv_caches[entry.dst_block_id][layer_idx] = (
+                    self.disk_kv_caches[entry.src_block_id][layer_idx])
+
+    def _save_layer_kv_blocks_to_disk(
+        self,
+        block_mappings: List[BlockMapping],
+        layer_idx: int,
+    ) -> None:
+        for block_map in block_mappings:
+            for entry in block_map.entries:
+                self.disk_kv_caches[entry.dst_block_id][layer_idx] = (
+                    self.host_kv_caches[entry.src_block_id][layer_idx])
+
+    async def load_kv_blocks_from_host(
+        self,
+        block_mappings: List[BlockMapping],
         stream: cuda.Stream,
     ) -> None:
         for layer_idx in range(self.num_layers):
-            if len(fetch_block_mappings) > 0:
-                for block_mapping in fetch_block_mappings:
-                    self.fetch(block_mapping, layer_idx, stream)
+            if len(block_mappings) > 0:
+                for block_mapping in block_mappings:
+                    self._load_layer_kv_blocks_from_host(
+                        block_mapping,
+                        layer_idx,
+                        stream,
+                    )
 
                     # This allows the task to yield execution to other tasks.
                     await asyncio.sleep(0)
@@ -268,44 +261,83 @@ class KVWorker:
 
                 self.kv_worker_handle.model_queue.put(b"")
 
-    async def write_through_kv_blocks(
+        await asyncio.to_thread(stream.synchronize)
+
+    async def save_kv_blocks_to_host(
         self,
-        write_through_block_mappings: List[BlockMapping],
+        block_mappings: List[BlockMapping],
         stream: cuda.Stream,
     ) -> None:
         for layer_idx in range(self.num_layers):
-            if len(write_through_block_mappings) > 0:
+            if len(block_mappings) > 0:
                 while self.kv_worker_handle.kv_queue.empty():
                     await asyncio.sleep(1e-5)
                 self.kv_worker_handle.kv_queue.get()
 
                 stream.wait_for_event(
                     self.kv_worker_handle.post_events[layer_idx])
-                for block_mapping in write_through_block_mappings:
-                    self.write_through(block_mapping, layer_idx, stream)
+                for block_mapping in block_mappings:
+                    self._save_layer_kv_blocks_to_host(
+                        block_mapping,
+                        layer_idx,
+                        stream,
+                    )
 
                     # This allows the task to yield execution to other tasks.
                     await asyncio.sleep(0)
 
-    async def transfer(
-        self,
-        fetch_block_mappings: List[BlockMapping],
-        write_through_block_mappings: List[BlockMapping],
-    ) -> None:
-        kv_transfer_tasks = [
-            self.fetch_kv_blocks(
-                fetch_block_mappings,
-                self.htod_stream,
-            ),
-            self.write_through_kv_blocks(
-                write_through_block_mappings,
-                self.dtoh_stream,
-            )
-        ]
+        await asyncio.to_thread(stream.synchronize)
 
-        await asyncio.gather(*kv_transfer_tasks)
-        self.htod_stream.synchronize()
-        self.dtoh_stream.synchronize()
+    async def load_kv_blocks_from_disk(
+        self,
+        block_mappings: List[BlockMapping],
+    ):
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(
+                self.disk_thread_pool,
+                self._load_layer_kv_blocks_from_disk,
+                block_mappings,
+                i,
+            ) for i in range(self.num_layers)
+        ]
+        await asyncio.gather(*tasks)
+
+    async def save_kv_blocks_to_disk(self, block_mappings: List[BlockMapping]):
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(
+                self.disk_thread_pool,
+                self._save_layer_kv_blocks_to_disk,
+                block_mappings,
+                i,
+            ) for i in range(self.num_layers)
+        ]
+        await asyncio.gather(*tasks)
+
+    async def _copy_kv_gpu_to_host(self, block_mappings: List[BlockMapping]):
+        await self.save_kv_blocks_to_host(block_mappings, self.dtoh_stream)
+
+    async def _copy_kv_host_to_gpu(self, block_mappings: List[BlockMapping]):
+        await self.load_kv_blocks_from_host(block_mappings, self.htod_stream)
+
+    async def _copy_kv_host_to_disk(self, block_mappings: List[BlockMapping]):
+        await self.save_kv_blocks_to_disk(block_mappings)
+
+    async def _copy_kv_disk_to_host(self, block_mappings: List[BlockMapping]):
+        await self.load_kv_blocks_from_disk(block_mappings)
+
+    async def copy_kv(
+        self,
+        block_mappings: List[BlockMapping],
+        src: Device,
+        dst: Device,
+    ) -> None:
+        key = (src, dst)
+        if key not in self.COPY_KV_OP_MAP:
+            raise ValueError(f"Unsupported copy direction: {src} -> {dst}")
+
+        await self.COPY_KV_OP_MAP[(src, dst)](block_mappings)
 
     def get_descriptors(self, block_ids: List[int]) -> bytes:
         tensors = [

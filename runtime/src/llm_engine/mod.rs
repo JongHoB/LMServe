@@ -8,4 +8,6 @@ pub(crate) mod worker;
 
 pub mod engine;
 
+pub(crate) use crate::pb::worker::{BlockMapping, BlockMappingEntry, Device};
+
 pub type Bytes = Vec<u8>;

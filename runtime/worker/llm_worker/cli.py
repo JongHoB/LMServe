@@ -22,8 +22,8 @@ from llm_worker.pb.worker_pb2 import (
     InferResponse,
     InitCacheRequest,
     InitCacheResponse,
-    KVTransferRequest,
-    KVTransferResponse,
+    CopyKVRequest,
+    CopyKVResponse,
     AgentMetadata,
     AddRemoteAgentMetadataResponse,
     GetDescriptorsRequest,
@@ -32,8 +32,6 @@ from llm_worker.pb.worker_pb2 import (
     PushKVResponse,
     PullKVRequest,
     PullKVResponse,
-    SwapKVRequest,
-    SwapKVResponse,
 )
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -149,38 +147,20 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
     def __init__(self, worker: KVWorker):
         self.worker = worker
 
-    async def TransferKV(
+    async def CopyKV(
         self,
-        request: KVTransferRequest,
+        request: CopyKVRequest,
         context: grpc.aio.ServicerContext,
-    ) -> KVTransferResponse:
-        fetch_block_mappings = request.fetch_block_mappings
-        write_through_block_mappings = request.write_through_block_mappings
-
-        await self.worker.transfer(fetch_block_mappings,
-                                   write_through_block_mappings)
-
-        return KVTransferResponse(success=True)
-
-    async def SwapInKV(
-        self,
-        request: SwapKVRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> SwapKVResponse:
+    ) -> CopyKVResponse:
         block_mappings = request.block_mappings
-        await self.worker.read_kv_blocks(block_mappings)
 
-        return SwapKVResponse(success=True)
+        await self.worker.copy_kv(
+            block_mappings,
+            src=request.src_device,
+            dst=request.dst_device,
+        )
 
-    async def SwapOutKV(
-        self,
-        request: SwapKVRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> SwapKVResponse:
-        block_mappings = request.block_mappings
-        await self.worker.write_kv_blocks(block_mappings)
-
-        return SwapKVResponse(success=True)
+        return CopyKVResponse(success=True)
 
     async def GetLocalAgentMetadata(
         self,
