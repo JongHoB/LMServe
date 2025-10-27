@@ -1,11 +1,15 @@
 [package]
-name = "runtime"
+name = "lmserve-runtime"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 
+[lib]
+name = "runtime"
+path = "src/lib.rs"
+
 [dependencies]
-utils = { workspace = true }
+lmserve-utils = { workspace = true }
 ahash = { workspace = true }
 anyhow = { workspace = true }
 tonic = { workspace = true }

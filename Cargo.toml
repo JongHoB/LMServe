@@ -12,8 +12,8 @@ authors = ["Jinwoo Jeong <jwjeong@csl.korea.ac.kr>"]
 edition = "2024"
 
 [workspace.dependencies]
-utils = { path = "utils" }
-runtime = { path = "runtime"}
+lmserve-utils = { path = "utils" }
+lmserve-runtime = { path = "runtime"}
 
 anyhow = "1.0.98"
 tonic = "0.13"

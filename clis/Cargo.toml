@@ -1,12 +1,16 @@
 [package]
-name = "clis"
+name = "lmserve-clis"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 
+[lib]
+name = "clis"
+path = "src/lib.rs"
+
 [dependencies]
-runtime = { workspace = true }
-utils = { workspace = true }
+lmserve-runtime = { workspace = true }
+lmserve-utils = { workspace = true }
 anyhow = { workspace = true }
 tokenizers = { workspace = true, features = ["http"] }
 tonic = { workspace = true }

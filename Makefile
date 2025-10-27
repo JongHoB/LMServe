@@ -1,5 +1,5 @@
 BIN_DIR    := bin
-PACKAGES   := runtime clis
+PACKAGES   := lmserve-runtime lmserve-clis
 BINARIES   := llm_srv api_server launcher
 MAKEFLAGS += --no-print-directory
 
