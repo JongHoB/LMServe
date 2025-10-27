@@ -19,7 +19,7 @@ use runtime::types::EngineKind;
 
 use clis::args::LLMSrvArgs;
 
-const WORKER_GROUP_UDS_PATH_PREFIX: &str = "/tmp/llmserve/group";
+const WORKER_GROUP_UDS_PATH_PREFIX: &str = "/tmp/lmserve/group";
 
 fn random_available_port(range: std::ops::Range<u16>) -> Option<u16> {
     let mut ports: Vec<u16> = range.collect();

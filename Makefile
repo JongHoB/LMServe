@@ -1,6 +1,6 @@
 BIN_DIR    := bin
 PACKAGES   := runtime clis
-BINARIES   := llm_srv api_server llm_clu
+BINARIES   := llm_srv api_server launcher
 MAKEFLAGS += --no-print-directory
 
 # Default setting

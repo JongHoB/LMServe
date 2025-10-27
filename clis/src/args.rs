@@ -77,6 +77,6 @@ pub struct LLMSrvArgs {
     #[arg(long, value_delimiter = ' ')]
     pub devices: Option<Vec<u8>>,
 
-    #[arg(long, default_value_t = configs::default_srv_address())]
+    #[arg(long, default_value_t = configs::default_nats_uri())]
     pub nats_uri: String,
 }

@@ -1,10 +1,10 @@
-# LLMCluConfig — YAML Options & Defaults
+# LMServe's Config — YAML Options & Defaults
 
-This document lists the available options for `LLMCluConfig`
+This document lists the available options for `launcher`
 
 ---
 
-## Top Level: `LLMCluConfig`
+## Top Level: `LauncherConfig`
 
 | Key | Type | Default |
 |---|---|---|

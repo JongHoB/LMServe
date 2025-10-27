@@ -31,7 +31,7 @@ default_fn!(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LLMCluConfig {
+pub struct LauncherConfig {
     pub model_name: String,
 
     #[serde(default = "default_nats_uri")]

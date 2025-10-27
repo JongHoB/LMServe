@@ -10,7 +10,7 @@ use serde_json::Value;
 use tracing::info;
 
 use clis::args::{APIServerArgs, CLIArgs, LLMSrvArgs};
-use clis::configs::{APIServerConfig, LLMCluConfig, LLMSrvConfig};
+use clis::configs::{APIServerConfig, LauncherConfig, LLMSrvConfig};
 use runtime::configs::{ControllerConfig, EngineConfig};
 use runtime::types;
 
@@ -42,11 +42,11 @@ fn to_cmd_args<T: Serialize>(args: &T) -> Vec<String> {
         .collect()
 }
 
-const LLMSERVE_BASE_PORT: u32 = 7000;
+const LLM_SERVER_BASE_PORT: u32 = 7000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root_dir = env::var("LLMSERVE_HOME").expect("LLMSERVE_HOME is not set");
+    let root_dir = env::var("LMSERVE_HOME").expect("LMSERVE_HOME is not set");
     let bin_path: PathBuf = PathBuf::from(root_dir).join("bin");
 
     if !bin_path.exists() {
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = CLIArgs::parse();
 
-    let config: LLMCluConfig = match args.config {
+    let config: LauncherConfig = match args.config {
         Some(config) => {
             let file = fs::File::open(config)?;
             let reader = BufReader::new(file);
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut llm_server_configs = Vec::with_capacity(args.num_worker_groups as usize);
             for i in 0..args.num_worker_groups {
-                let port = LLMSERVE_BASE_PORT + i;
+                let port = LLM_SERVER_BASE_PORT + i;
 
                 let engine_config: EngineConfig =
                     serde_yaml::from_value(serde_yaml::to_value(&args)?)?;
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
 
-            LLMCluConfig {
+            LauncherConfig {
                 model_name: args.model_name,
                 api_server: api_server_config,
                 controller: controller_config,
