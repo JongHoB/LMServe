@@ -15,6 +15,7 @@ use tracing_futures::Instrument;
 
 use runtime::llm_engine::engine::LLMEngineWrapper;
 use runtime::llm_srv::LLMService;
+use runtime::types::EngineKind;
 
 use clis::args::LLMSrvArgs;
 
@@ -46,11 +47,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    let root_span = tracing::info_span!("LLMServer", port=%address.port(), kind= %args.kind);
+    let root_span = match args.kind {
+        EngineKind::All => {
+            tracing::info_span!("LLMServer", port=%address.port())
+        }
+        _ => {
+            tracing::info_span!("LLMServer", port=%address.port(), kind= %args.kind)
+        }
+    };
+
     let _root_guard = root_span.clone().entered();
 
     let group_id = env::var("GROUP_ID").unwrap_or(String::from("0"));
-    let devices = args.devices.clone().unwrap_or((0..args.engine.tp_size).collect());
+    let devices = args
+        .devices
+        .clone()
+        .unwrap_or((0..args.engine.tp_size).collect());
 
     let worker_group_uds_path = format!("{}-{}", WORKER_GROUP_UDS_PATH_PREFIX, group_id);
     let worker_port = random_available_port(6000..7000).expect("Not found available port");
@@ -93,14 +105,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let engine = Arc::new(
-        LLMEngineWrapper::new(
-            group_id,
-            args.engine,
-            worker_group_uds_path,
-            args.nats_uri,
-        )
-        .await
-        .expect("Failed to start API Server"),
+        LLMEngineWrapper::new(group_id, args.engine, worker_group_uds_path, args.nats_uri)
+            .await
+            .expect("Failed to start API Server"),
     );
 
     // Run the engine asynchronously in the background
