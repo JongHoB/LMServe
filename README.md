@@ -21,6 +21,10 @@ To install the protobuf compiler on Ubuntu, run:
 $ apt install -y protobuf-compiler
 ```
 
+## Supported Models
+* **Llama**: 2, 3, 3.1, 3.2
+* **Qwen**: 2, 2.5
+
 ## Get Started
 You can easily build this project by running:
 ```bash
