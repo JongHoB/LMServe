@@ -14,11 +14,12 @@ Note that LMServe includes key ideas proposed in our ASPLOS 2025 paper, `Acceler
 
 ## Requirements
 * CUDA
+* OpenSSL
 * Protobuf compiler
 
-To install the protobuf compiler on Ubuntu, run:
+To install the openssl and the protobuf compiler on Ubuntu, run:
 ```bash
-$ apt install -y protobuf-compiler
+$ apt install -y pkg-config libssl-dev protobuf-compiler
 ```
 
 ## Supported Models

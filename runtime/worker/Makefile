@@ -48,7 +48,7 @@ $(PY_PROTO_OUT_DIR)/%_pb2_grpc.py: $(PROTO_DIR)/%.proto
 
 check-grpc-tools:
 	@python3 -c "import grpc_tools" 2>/dev/null || \
-		( echo "Installing grpcio-tools..."; pip install grpcio-tools )
+		( echo "Installing grpcio-tools..."; $(PIP_CMD) install grpcio-tools )
 
 clean:
 	rm -f $(PY_PROTO_OUT_DIR)/*.py
