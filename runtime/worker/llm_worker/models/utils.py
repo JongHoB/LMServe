@@ -112,7 +112,7 @@ def load_weights(
             shard_size = param.shape[1]
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            loaded_weight = loaded_weight[start_idx:end_idx]
+            loaded_weight = loaded_weight[:, start_idx:end_idx]
 
     assert param.shape == loaded_weight.shape, (
         f"Tensor shape mismatch between model and checkpoint: "
