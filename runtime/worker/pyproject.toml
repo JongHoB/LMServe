@@ -14,7 +14,7 @@ dependencies = [
     "loguru>=0.7.3",
     "torch>=2.4.0",
     "numpy>=2.2.0",
-    "transformers>4.47.1",
+    "transformers<5",
     "flashinfer-python>=0.2.5",
     "hf-xet>=1.1.2",
     "pycuda>=2025.1",
@@ -25,5 +25,6 @@ dependencies = [
 [project.scripts]
 llm-worker = "llm_worker.cli:app"
 
-[tool.setuptools]
-packages = ["llm_worker"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["llm_worker*"]
